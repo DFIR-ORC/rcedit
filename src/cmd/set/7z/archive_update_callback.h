@@ -24,8 +24,8 @@ class ArchiveUpdateCallback
     , public CMyUnknownImp
 {
 public:
-    MY_UNKNOWN_IMP
 
+    Z7_COM_UNKNOWN_IMP_0
     // IProgress
     STDMETHOD( SetTotal )( UInt64 /* size */ ) { return S_OK; }
     STDMETHOD( SetCompleted )( const UInt64* completeValue ) { return S_OK; }
