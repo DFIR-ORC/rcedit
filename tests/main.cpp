@@ -13,8 +13,10 @@
 namespace rcedit::test {
 
 int RunVersionTests();
-// Later tasks add: RunErrorTests, RunEncodingTests, RunResourceIdTests,
-// RunCodecTests, RunEngineTests, RunOpsTests, RunArgsTests.
+int RunErrorTests();
+int RunEncodingTests();
+// Later tasks add: RunResourceIdTests, RunCodecTests, RunEngineTests,
+// RunOpsTests, RunArgsTests.
 
 struct Group
 {
@@ -24,6 +26,8 @@ struct Group
 
 constexpr Group kGroups[] = {
     { "version", RunVersionTests },
+    { "error", RunErrorTests },
+    { "encoding", RunEncodingTests },
 };
 
 }  // namespace rcedit::test

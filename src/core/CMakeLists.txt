@@ -8,6 +8,16 @@
 set(RCEDIT_CORE_SOURCES
     version.h
     version.cpp
+    error.h
+    error.cpp
+    log.h
+    log.cpp
+    output.h
+    output.cpp
+    encoding.h
+    encoding.cpp
+    format.h
+    guard.h
 )
 
 add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})

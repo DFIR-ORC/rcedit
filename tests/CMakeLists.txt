@@ -10,12 +10,14 @@ add_executable(rcedit_tests
     context.h
     main.cpp
     test_version.cpp
+    test_error.cpp
+    test_encoding.cpp
 )
 target_link_libraries(rcedit_tests PRIVATE rcedit_core)
 target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
-set(RCEDIT_TEST_GROUPS version)
+set(RCEDIT_TEST_GROUPS version error encoding)
 foreach(group IN LISTS RCEDIT_TEST_GROUPS)
     add_test(NAME ${group} COMMAND rcedit_tests ${group})
 endforeach()
