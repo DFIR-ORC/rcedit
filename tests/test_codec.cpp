@@ -8,9 +8,14 @@
 #include "check.h"
 
 #include <algorithm>
+#include <memory>
 
 #include "core/codec.h"
 #include "core/error.h"
+
+#ifdef RCEDIT_HAS_ZSTD
+#    include <zstd.h>
+#endif
 
 namespace rcedit::test {
 
@@ -162,6 +167,78 @@ void ZstdRejectsCorrupt()
 {
     RejectsCorruptInput( ZstdCodec() );
 }
+
+// Builds a valid zstd frame that omits the embedded content size.
+// ZstdCodecImpl::Compress always goes through ZSTD_compress2, which pledges
+// the size and so always produces a frame with a known content size; the
+// only way to reach the codec's "unknown content size" decompression branch
+// is to feed it a frame built like this one. Note: neither leaving the
+// pledged size unset nor explicitly pledging ZSTD_CONTENTSIZE_UNKNOWN is
+// sufficient here — zstd's internal representation of "unknown" for the
+// pledge (pledgedSrcSize+1 wrapping to 0) is indistinguishable from "no
+// pledge given", and with the *entire* input handed over in a single
+// ZSTD_e_end call zstd auto-infers and writes the size anyway. The only
+// reliable way to suppress the header field is ZSTD_c_contentSizeFlag=0.
+std::vector< uint8_t > CompressStreamingNoContentSize(
+    std::span< const uint8_t > input )
+{
+    struct CCtxDeleter
+    {
+        void operator()( ZSTD_CCtx* p ) const noexcept { ZSTD_freeCCtx( p ); }
+    };
+    std::unique_ptr< ZSTD_CCtx, CCtxDeleter > cctx( ZSTD_createCCtx() );
+    CHECK( cctx != nullptr );
+
+    const size_t flagRc =
+        ZSTD_CCtx_setParameter( cctx.get(), ZSTD_c_contentSizeFlag, 0 );
+    CHECK( !ZSTD_isError( flagRc ) );
+
+    std::vector< uint8_t > out( ZSTD_compressBound( input.size() ) + 64 );
+    ZSTD_inBuffer in{ input.data(), input.size(), 0 };
+    ZSTD_outBuffer outBuf{ out.data(), out.size(), 0 };
+    const size_t rc =
+        ZSTD_compressStream2( cctx.get(), &outBuf, &in, ZSTD_e_end );
+    CHECK( !ZSTD_isError( rc ) );
+    CHECK( rc == 0 );  // fully flushed in this single call
+    out.resize( outBuf.pos );
+    return out;
+}
+
+void ZstdStreamingFrameRoundTrip()
+{
+    const auto input = Pattern( 5000 );
+    const auto packed = CompressStreamingNoContentSize( input );
+    CHECK( !packed.empty() );
+    CHECK( DetectCodec( packed ) == CodecId::Zstd );
+
+    // No embedded content size: ContentSize() must report unknown, which is
+    // what routes Decompress() through the streaming branch under test.
+    CHECK( !ZstdCodec().ContentSize( packed ).has_value() );
+
+    std::vector< uint8_t > unpacked;
+    CHECK_EC_OK( ZstdCodec().Decompress( packed, unpacked ) );
+    CHECK( unpacked == input );
+}
+
+void ZstdStreamingFrameRejectsTruncation()
+{
+    const auto input = Pattern( 5000 );
+    const auto packed = CompressStreamingNoContentSize( input );
+    CHECK( !ZstdCodec().ContentSize( packed ).has_value() );
+    CHECK( packed.size() > 100 );
+
+    // Cut the frame well before its end. ZSTD_decompressStream runs out of
+    // input while it still expects more (a non-zero, non-error return); the
+    // codec must surface that as corrupt_payload, not a silently short
+    // decompression.
+    std::vector< uint8_t > truncated(
+        packed.begin(),
+        packed.begin() + static_cast< ptrdiff_t >( packed.size() / 2 ) );
+
+    std::vector< uint8_t > out;
+    const auto ec = ZstdCodec().Decompress( truncated, out );
+    CHECK( ec == errc::corrupt_payload );
+}
 #endif
 
 #ifdef RCEDIT_HAS_7Z
@@ -189,6 +266,9 @@ constexpr TestCase kCases[] = {
     { "ZstdRoundTrip", ZstdRoundTrip },
     { "ZstdRejectsEmpty", ZstdRejectsEmpty },
     { "ZstdRejectsCorrupt", ZstdRejectsCorrupt },
+    { "ZstdStreamingFrameRoundTrip", ZstdStreamingFrameRoundTrip },
+    { "ZstdStreamingFrameRejectsTruncation",
+      ZstdStreamingFrameRejectsTruncation },
 #endif
 #ifdef RCEDIT_HAS_7Z
     { "SevenZipRoundTrip", SevenZipRoundTrip },

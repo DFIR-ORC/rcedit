@@ -144,12 +144,21 @@ std::error_code ZstdCodecImpl::Decompress(
         return {};
     }
 
-    // Frame without a recorded content size: streaming loop.
+    // Frame without a recorded content size: streaming loop. Track the last
+    // ZSTD_decompressStream return: it is a hint (not an error caught by
+    // ZSTD_isError) that is 0 only once the frame is fully reconstructed, and
+    // > 0 while more input is still expected. Exiting the loop because input
+    // ran out (in.pos == in.size) with a non-zero last return means the frame
+    // was truncated, which must be reported as corrupt, not as a silently
+    // short decompression.
     ZSTD_inBuffer in{ input.data(), input.size(), 0 };
     std::vector< uint8_t > chunk( ZSTD_DStreamOutSize() );
+    // Non-zero sentinel: input is non-empty (checked above), so the loop
+    // below always runs at least once and overwrites this before use.
+    size_t rc = 1;
     while( in.pos < in.size ) {
         ZSTD_outBuffer out{ chunk.data(), chunk.size(), 0 };
-        const size_t rc = ZSTD_decompressStream( dctx.get(), &out, &in );
+        rc = ZSTD_decompressStream( dctx.get(), &out, &in );
         if( ZSTD_isError( rc ) ) {
             Log::Debug(
                 L"Failed ZSTD_decompressStream [{}]", ZstdErrorName( rc ) );
@@ -167,6 +176,10 @@ std::error_code ZstdCodecImpl::Decompress(
         if( rc == 0 ) {
             break;
         }
+    }
+    if( rc != 0 ) {
+        Log::Debug( L"Truncated zstd frame: input exhausted before frame end" );
+        return make_error_code( errc::corrupt_payload );
     }
 
     output = std::move( result );
