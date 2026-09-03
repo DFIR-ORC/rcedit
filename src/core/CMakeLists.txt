@@ -22,6 +22,8 @@ set(RCEDIT_CORE_SOURCES
     resource_id.cpp
     codec.h
     codec.cpp
+    engine.h
+    engine_win32.cpp
 )
 
 add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})

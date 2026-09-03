@@ -8,12 +8,14 @@
 add_executable(rcedit_tests
     check.h
     context.h
+    temp.h
     main.cpp
     test_version.cpp
     test_error.cpp
     test_encoding.cpp
     test_resource_id.cpp
     test_codec.cpp
+    test_engine.cpp
 )
 target_link_libraries(rcedit_tests PRIVATE rcedit_core)
 target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -46,13 +48,19 @@ if(RCEDIT_ENABLE_ZSTD)
     target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
 endif()
 
+add_executable(rcedit_fixture fixture/fixture.c fixture/fixture.rc)
+add_dependencies(rcedit_tests rcedit_fixture)
+# MSVC's linker embeds a default manifest (RT_MANIFEST #1, lang 1033) unless
+# suppressed; the fixture's baseline must contain only its RCDATA resource.
+target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
+
 # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
-set(RCEDIT_TEST_GROUPS version error encoding resource_id codec)
+set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine)
 if(RCEDIT_ENABLE_7Z)
     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
 endif()
 foreach(group IN LISTS RCEDIT_TEST_GROUPS)
-    add_test(NAME ${group} COMMAND rcedit_tests ${group})
+    add_test(NAME ${group} COMMAND rcedit_tests ${group} $<TARGET_FILE:rcedit_fixture>)
 endforeach()
 
 # Import allowlist check on a target's real executable.
