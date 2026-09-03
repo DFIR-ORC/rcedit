@@ -7,6 +7,8 @@
 #
 add_executable(rcedit
     main.cpp
+    args.h
+    args.cpp
 )
 
 target_link_libraries(rcedit PRIVATE rcedit_core)

@@ -22,7 +22,7 @@ int RunEngineTests();
 int RunSevenZipTests();
 #endif
 int RunOpsTests();
-// Later tasks add: RunArgsTests.
+int RunArgsTests();
 
 struct Group
 {
@@ -37,7 +37,7 @@ constexpr Group kGroups[] = {
 #ifdef RCEDIT_HAS_7Z
     { "sevenzip", RunSevenZipTests },
 #endif
-    { "ops", RunOpsTests },
+    { "ops", RunOpsTests },           { "args", RunArgsTests },
 };
 
 }  // namespace rcedit::test

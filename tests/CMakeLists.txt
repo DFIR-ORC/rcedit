@@ -17,6 +17,8 @@ add_executable(rcedit_tests
     test_codec.cpp
     test_engine.cpp
     test_ops.cpp
+    test_args.cpp
+    "${CMAKE_SOURCE_DIR}/src/cli/args.cpp"
 )
 target_link_libraries(rcedit_tests PRIVATE rcedit_core)
 target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -56,7 +58,7 @@ add_dependencies(rcedit_tests rcedit_fixture)
 target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
 
 # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
-set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops)
+set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args)
 if(RCEDIT_ENABLE_7Z)
     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
 endif()
