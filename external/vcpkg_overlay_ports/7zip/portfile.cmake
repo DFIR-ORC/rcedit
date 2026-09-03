@@ -7,7 +7,6 @@ vcpkg_from_github(
     PATCHES
         add-functions-and-fixes-for-static-link.patch
         my-com.patch
-        mycharupper-no-user32.patch
 )
 
 file(COPY "${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt" DESTINATION "${SOURCE_PATH}")

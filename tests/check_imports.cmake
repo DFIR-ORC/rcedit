@@ -12,15 +12,6 @@ if(NOT DUMPBIN OR NOT EXE OR NOT DEFINED ALLOWED)
     message(FATAL_ERROR "check_imports.cmake needs DUMPBIN, EXE and ALLOWED")
 endif()
 
-# The import allowlist hardens the distributed (release) binary. Debug builds
-# are dev-only and never shipped; without optimization/OPT:REF they retain
-# upstream 7-Zip's guarded-but-unreached USER32 DBCS helpers (e.g. CharPrevExA
-# in HasTailSlash, dead under rcedit's always-CP_UTF8 usage). Don't gate them.
-if(CONFIG STREQUAL "Debug")
-    message(STATUS "imports check skipped for Debug build (dev-only, not the distributed artifact)")
-    return()
-endif()
-
 execute_process(
     COMMAND "${DUMPBIN}" /nologo /imports "${EXE}"
     OUTPUT_VARIABLE output

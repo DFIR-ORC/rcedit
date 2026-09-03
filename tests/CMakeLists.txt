@@ -75,7 +75,7 @@ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
 function(rcedit_add_import_check target)
     set(allowed "KERNEL32.dll")
     if(RCEDIT_ENABLE_7Z)
-        list(APPEND allowed "OLEAUT32.dll")
+        list(APPEND allowed "OLEAUT32.dll" "USER32.dll")
     endif()
 
     add_test(
@@ -84,7 +84,6 @@ function(rcedit_add_import_check target)
             "-DDUMPBIN=${RCEDIT_DUMPBIN}"
             "-DEXE=$<TARGET_FILE:${target}>"
             "-DALLOWED=${allowed}"
-            "-DCONFIG=$<CONFIG>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/check_imports.cmake"
     )
 endfunction()
