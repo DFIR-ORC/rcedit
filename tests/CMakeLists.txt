@@ -55,8 +55,9 @@ endif()
 
 add_executable(rcedit_fixture fixture/fixture.c fixture/fixture.rc)
 add_dependencies(rcedit_tests rcedit_fixture)
-# MSVC's linker embeds a default manifest (RT_MANIFEST #1, lang 1033) unless
-# suppressed; the fixture's baseline must contain only its RCDATA resource.
+# MSVC's linker embeds a default manifest (resource type RT_MANIFEST = 24,
+# name CREATEPROCESS_MANIFEST_RESOURCE_ID = 1, lang 1033) unless suppressed;
+# the fixture's baseline must contain only its RCDATA resource.
 target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
 
 # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.

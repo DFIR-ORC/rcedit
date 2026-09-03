@@ -8,6 +8,8 @@
 #include "check.h"
 #include "temp.h"
 
+#include <fstream>
+
 #include <windows.h>
 
 #include "core/codec.h"
@@ -49,6 +51,19 @@ std::vector< uint8_t > Pattern( size_t size )
     }
 
     return v;
+}
+
+// Writes a file that is not a valid PE, so LoadLibraryExW (engine.Open)
+// deterministically fails on it -- used to force a failure after
+// CopyToOutput has already created 'output'.
+std::filesystem::path WriteNotAPe(
+    const TempDir& dir,
+    std::wstring_view fileName )
+{
+    const auto path = dir.Path() / fileName;
+    std::ofstream f( path, std::ios::binary );
+    f << "not a PE file";
+    return path;
 }
 
 std::vector< ListEntry > ListAll( const std::filesystem::path& pe )
@@ -168,6 +183,37 @@ void SetWithOutputLeavesSourceUnchanged()
 
     CHECK( ListAll( pe ).size() == 1 );
     CHECK( ListAll( out ).size() == 2 );
+}
+
+// A failure that strikes after CopyToOutput has already created 'output'
+// (here: engine.Open fails because 'pe' is not actually a valid PE, so the
+// copy at 'output' is garbage too) must not leave that stray file behind.
+void SetFailureAfterCopyRemovesOutput()
+{
+    TempDir dir;
+    const auto badPe = WriteNotAPe( dir, L"bad.exe" );
+    const auto out = dir.Path() / L"out.exe";
+    auto engine = MakeWin32Engine();
+
+    const auto ec =
+        Set( *engine, badPe, kConfigNoLang, Bytes( "x" ), CodecId::None, out );
+    CHECK( ec );
+    CHECK( !std::filesystem::exists( out ) );
+}
+
+// Same as above but for Remove: CopyToOutput succeeds (pe is a valid PE),
+// but ResolveLanguage then fails deterministically because CONFIG does not
+// exist in the fixture's baseline.
+void RemoveFailureAfterCopyRemovesOutput()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    const auto out = dir.Path() / L"out.exe";
+    auto engine = MakeWin32Engine();
+
+    CHECK(
+        Remove( *engine, pe, kConfigNoLang, out ) == errc::resource_not_found );
+    CHECK( !std::filesystem::exists( out ) );
 }
 
 void SetRefusesRunningExecutable()
@@ -439,6 +485,9 @@ constexpr TestCase kCases[] = {
     { "SetEmptyFails", SetEmptyFails },
     { "SetWithOutputLeavesSourceUnchanged",
       SetWithOutputLeavesSourceUnchanged },
+    { "SetFailureAfterCopyRemovesOutput", SetFailureAfterCopyRemovesOutput },
+    { "RemoveFailureAfterCopyRemovesOutput",
+      RemoveFailureAfterCopyRemovesOutput },
     { "SetRefusesRunningExecutable", SetRefusesRunningExecutable },
 #if !defined( RCEDIT_HAS_ZSTD ) || !defined( RCEDIT_HAS_7Z )
     { "SetErrorPrecedenceSelfUpdateBeforeCodecDisabled",

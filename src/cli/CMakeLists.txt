@@ -15,7 +15,14 @@ add_executable(rcedit
 
 target_link_libraries(rcedit PRIVATE rcedit_core)
 
-# Anti side-loading link policy: no default libraries, explicit allowlist.
+# Anti side-loading link policy. /NODEFAULTLIB drops the libs the CRT would
+# otherwise pull in via #pragma comment(lib, ...); CMake's implicit
+# CMAKE_CXX_STANDARD_LIBRARIES (gdi32.lib, shell32.lib, ole32.lib,
+# user32.lib, etc.) still lands on the link line regardless, so the explicit
+# lib list below is not itself the guarantee that those libs contribute no
+# imports -- it's just what rcedit actually needs. The real guarantee is the
+# "imports" CTest (check_imports.cmake), which inspects the built exe's real
+# PE import table.
 target_link_options(rcedit PRIVATE /NODEFAULTLIB /DEBUG /OPT:REF /OPT:ICF)
 
 set(RCEDIT_CRT_LIBS

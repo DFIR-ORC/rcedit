@@ -59,32 +59,39 @@ Z7_COM7F_IMF(
         return E_INVALIDARG;
     }
 
-    NWindows::NCOM::CPropVariant prop;
-    switch( propID ) {
-        case kpidPath:
-            prop = m_name.c_str();
-            break;
-        case kpidIsDir:
-            prop = false;
-            break;
-        case kpidIsAnti:
-            prop = false;
-            break;
-        case kpidSize:
-            prop = static_cast< UInt64 >( m_content.size() );
-            break;
-        case kpidAttrib:
-            prop = static_cast< UInt32 >( FILE_ATTRIBUTE_NORMAL );
-            break;
-        case kpidCTime:
-        case kpidATime:
-        case kpidMTime:
-            prop = m_time;
-            break;
-        default:
-            break;
+    // Invoked by 7-Zip across a COM frame; no exception may escape.
+    try {
+        NWindows::NCOM::CPropVariant prop;
+        switch( propID ) {
+            case kpidPath:
+                prop = m_name.c_str();
+                break;
+            case kpidIsDir:
+                prop = false;
+                break;
+            case kpidIsAnti:
+                prop = false;
+                break;
+            case kpidSize:
+                prop = static_cast< UInt64 >( m_content.size() );
+                break;
+            case kpidAttrib:
+                prop = static_cast< UInt32 >( FILE_ATTRIBUTE_NORMAL );
+                break;
+            case kpidCTime:
+            case kpidATime:
+            case kpidMTime:
+                prop = m_time;
+                break;
+            default:
+                break;
+        }
+
+        prop.Detach( value );
     }
-    prop.Detach( value );
+    catch( ... ) {
+        return E_OUTOFMEMORY;
+    }
     return S_OK;
 }
 
@@ -102,8 +109,14 @@ Z7_COM7F_IMF(
         return S_OK;  // 7-Zip expects a null stream for empty files
     }
 
-    CMyComPtr< ISequentialInStream > stream = new InMemStream( m_content );
-    *inStream = stream.Detach();
+    // Invoked by 7-Zip across a COM frame; no exception may escape.
+    try {
+        CMyComPtr< ISequentialInStream > stream = new InMemStream( m_content );
+        *inStream = stream.Detach();
+    }
+    catch( ... ) {
+        return E_OUTOFMEMORY;
+    }
     return S_OK;
 }
 

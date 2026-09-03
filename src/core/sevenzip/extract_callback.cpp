@@ -42,9 +42,15 @@ Z7_COM7F_IMF(
         return S_OK;
     }
 
-    m_output.clear();
-    CMyComPtr< ISequentialOutStream > stream = new OutMemStream( m_output );
-    *outStream = stream.Detach();
+    // Invoked by 7-Zip across a COM frame; no exception may escape.
+    try {
+        m_output.clear();
+        CMyComPtr< ISequentialOutStream > stream = new OutMemStream( m_output );
+        *outStream = stream.Detach();
+    }
+    catch( ... ) {
+        return E_OUTOFMEMORY;
+    }
     return S_OK;
 }
 

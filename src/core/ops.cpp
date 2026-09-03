@@ -106,6 +106,20 @@ std::error_code CopyToOutput(
     return ec;
 }
 
+// Best-effort cleanup for a failure that occurs after CopyToOutput has
+// already created 'output': removes it so a doomed Set/Remove does not leave
+// a stray copy behind. A no-op when 'output' was not given. The remove's own
+// error is ignored; 'pe' is never touched.
+void RemoveStrayOutput( const std::optional< fs::path >& output )
+{
+    if( !output ) {
+        return;
+    }
+
+    std::error_code ec;
+    fs::remove( *output, ec );
+}
+
 }  // namespace
 
 bool IsRunningExecutable( const fs::path& path )
@@ -274,14 +288,22 @@ std::error_code Set(
     }
 
     if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+        RemoveStrayOutput( output );
         return ec;
     }
 
     if( const auto ec = engine.Write( resolved, payload ) ) {
         engine.Discard();
+        RemoveStrayOutput( output );
         return ec;
     }
-    return engine.Commit();
+
+    if( const auto ec = engine.Commit() ) {
+        RemoveStrayOutput( output );
+        return ec;
+    }
+
+    return {};
 }
 
 std::error_code Remove(
@@ -300,6 +322,7 @@ std::error_code Remove(
     }
 
     if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+        RemoveStrayOutput( output );
         return ec;
     }
 
@@ -307,14 +330,22 @@ std::error_code Remove(
     std::vector< uint16_t > candidates;
     if( const auto ec = ResolveLanguage( engine, key, resolved, candidates ) ) {
         engine.Discard();
+        RemoveStrayOutput( output );
         return ec;
     }
 
     if( const auto ec = engine.Remove( resolved ) ) {
         engine.Discard();
+        RemoveStrayOutput( output );
         return ec;
     }
-    return engine.Commit();
+
+    if( const auto ec = engine.Commit() ) {
+        RemoveStrayOutput( output );
+        return ec;
+    }
+
+    return {};
 }
 
 std::error_code Hexdump(

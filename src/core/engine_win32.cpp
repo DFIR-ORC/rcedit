@@ -33,13 +33,17 @@ bool IsEnumerationEnd( unsigned long code ) noexcept
 
 struct EnumContext
 {
-    HMODULE module = nullptr;
     std::vector< ResourceEntry >* entries = nullptr;
     std::error_code ec;
     ResourceId type;
     ResourceId name;
 };
 
+// These callbacks are invoked by kernel32 across a plain C frame; no
+// exception (e.g. std::bad_alloc from a std::wstring/push_back/new) may
+// escape. Returning FALSE stops enumeration, which Enumerate() reports as
+// ctx.ec/GetLastError, so a caught exception is surfaced as an error rather
+// than a silently-truncated success.
 BOOL CALLBACK OnLanguage(
     HMODULE module,
     LPCWSTR type,
@@ -49,47 +53,70 @@ BOOL CALLBACK OnLanguage(
 {
     auto* ctx = reinterpret_cast< EnumContext* >( param );
 
-    HRSRC found = ::FindResourceExW( module, type, name, lang );
-    if( found == nullptr ) {
-        ctx->ec = LastWin32Error();
+    try {
+        HRSRC found = ::FindResourceExW( module, type, name, lang );
+        if( found == nullptr ) {
+            ctx->ec = LastWin32Error();
+            return FALSE;
+        }
+
+        const DWORD size = ::SizeofResource( module, found );
+        ctx->entries->push_back(
+            ResourceEntry{ ResourceKey{ ctx->type, ctx->name, lang }, size } );
+        return TRUE;
+    }
+    catch( ... ) {
+        ctx->ec = std::make_error_code( std::errc::not_enough_memory );
         return FALSE;
     }
-
-    const DWORD size = ::SizeofResource( module, found );
-    ctx->entries->push_back(
-        ResourceEntry{ ResourceKey{ ctx->type, ctx->name, lang }, size } );
-    return TRUE;
 }
 
 BOOL CALLBACK
 OnName( HMODULE module, LPCWSTR type, LPWSTR name, LONG_PTR param )
 {
     auto* ctx = reinterpret_cast< EnumContext* >( param );
-    ctx->name = FromLpcwstr( name );
 
-    if( !::EnumResourceLanguagesW( module, type, name, OnLanguage, param ) ) {
-        const DWORD code = ::GetLastError();
-        if( !IsEnumerationEnd( code ) ) {
-            ctx->ec = Win32Error( code );
-            return FALSE;
+    try {
+        ctx->name = FromLpcwstr( name );
+
+        if( !::EnumResourceLanguagesW(
+                module, type, name, OnLanguage, param ) ) {
+            const DWORD code = ::GetLastError();
+            if( !IsEnumerationEnd( code ) ) {
+                ctx->ec = Win32Error( code );
+                return FALSE;
+            }
         }
+
+        return ctx->ec ? FALSE : TRUE;
     }
-    return ctx->ec ? FALSE : TRUE;
+    catch( ... ) {
+        ctx->ec = std::make_error_code( std::errc::not_enough_memory );
+        return FALSE;
+    }
 }
 
 BOOL CALLBACK OnType( HMODULE module, LPWSTR type, LONG_PTR param )
 {
     auto* ctx = reinterpret_cast< EnumContext* >( param );
-    ctx->type = FromLpcwstr( type );
 
-    if( !::EnumResourceNamesW( module, type, OnName, param ) ) {
-        const DWORD code = ::GetLastError();
-        if( !IsEnumerationEnd( code ) ) {
-            ctx->ec = Win32Error( code );
-            return FALSE;
+    try {
+        ctx->type = FromLpcwstr( type );
+
+        if( !::EnumResourceNamesW( module, type, OnName, param ) ) {
+            const DWORD code = ::GetLastError();
+            if( !IsEnumerationEnd( code ) ) {
+                ctx->ec = Win32Error( code );
+                return FALSE;
+            }
         }
+
+        return ctx->ec ? FALSE : TRUE;
     }
-    return ctx->ec ? FALSE : TRUE;
+    catch( ... ) {
+        ctx->ec = std::make_error_code( std::errc::not_enough_memory );
+        return FALSE;
+    }
 }
 
 struct LangMatchContext
@@ -162,7 +189,6 @@ public:
 
         std::vector< ResourceEntry > found;
         EnumContext ctx;
-        ctx.module = m_module.get();
         ctx.entries = &found;
 
         if( !::EnumResourceTypesW(
@@ -304,6 +330,15 @@ public:
 
     void Discard() override
     {
+        // Also releases the exclusive read-only mapping from Open(), even
+        // when no update session was started yet (e.g. Remove() failed to
+        // resolve its target before ever calling Write/Remove). Without
+        // this, a caller that deletes the underlying file right after a
+        // discarded session (e.g. to clean up a doomed --output copy) would
+        // hit a sharing violation, since Open()'s LOAD_LIBRARY_AS_DATAFILE_
+        // EXCLUSIVE mapping does not grant FILE_SHARE_DELETE.
+        m_module.reset();
+
         if( m_update == nullptr ) {
             return;
         }
@@ -344,7 +379,9 @@ private:
             }
 
             const DWORD code = ::GetLastError();
-            if( IsNotFound( code ) ) {
+            // ERROR_RESOURCE_DATA_NOT_FOUND (1812) is also a not-found here:
+            // IsNotFound() only covers type/name/lang (1813-1815).
+            if( IsNotFound( code ) || code == ERROR_RESOURCE_DATA_NOT_FOUND ) {
                 return make_error_code( errc::resource_not_found );
             }
 
