@@ -1,97 +1,73 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# Copyright 2011-2019 ANSSI. All Rights Reserved.
+# Copyright 2026 ANSSI. All Rights Reserved.
 #
-# Author(s): fabienfl
+# Author(s): fabienfl (ANSSI)
 #
+cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
-cmake_minimum_required(VERSION 3.16 FATAL_ERROR)
+option(RCEDIT_ENABLE_7Z "Build the 7z codec (links 7-Zip statically)" ON)
+option(RCEDIT_ENABLE_ZSTD "Build the zstd codec (links zstd statically)" ON)
+option(RCEDIT_BUILD_TESTS "Build and register tests" ON)
 
-project(rcedit)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-if(ENABLE_STATIC_RUNTIME)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-else()
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+# vcpkg must be wired before project() so the toolchain sees it.
+set(RCEDIT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+if(NOT DEFINED VCPKG_ROOT)
+    set(VCPKG_ROOT "${RCEDIT_ROOT}/external/vcpkg")
+endif()
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE FILEPATH "")
+endif()
+set(VCPKG_OVERLAY_PORTS "${RCEDIT_ROOT}/external/vcpkg_overlay_ports")
+set(VCPKG_OVERLAY_TRIPLETS "${RCEDIT_ROOT}/external/vcpkg_overlay_triplets")
+if(NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
 endif()
 
-add_compile_options(/EHsc)
+set(VCPKG_MANIFEST_FEATURES "")
+if(RCEDIT_ENABLE_7Z)
+    list(APPEND VCPKG_MANIFEST_FEATURES "7z")
+endif()
+if(RCEDIT_ENABLE_ZSTD)
+    list(APPEND VCPKG_MANIFEST_FEATURES "zstd")
+endif()
 
-list(APPEND COMPILE_OPTIONS_RELEASE
-    /guard:cf
-)
+project(rcedit VERSION 2.0.0 LANGUAGES C CXX RC)
 
-foreach(OPTION IN ITEMS ${COMPILE_OPTIONS_DEBUG})
-    add_compile_options($<$<CONFIG:DEBUG>:${OPTION}>)
-endforeach()
+if(NOT MSVC)
+    message(FATAL_ERROR "rcedit requires MSVC")
+endif()
+if(BUILD_SHARED_LIBS)
+    message(FATAL_ERROR "rcedit is static only: BUILD_SHARED_LIBS must be OFF")
+endif()
+if(NOT VCPKG_TARGET_TRIPLET STREQUAL "x64-windows-static")
+    message(FATAL_ERROR "rcedit is static only: triplet must be x64-windows-static (got ${VCPKG_TARGET_TRIPLET})")
+endif()
 
-foreach(OPTION IN ITEMS ${COMPILE_OPTIONS_RELEASE})
-    add_compile_options($<$<CONFIG:RELEASE>:${OPTION}>)
-    add_compile_options($<$<CONFIG:MINSIZEREL>:${OPTION}>)
-    add_compile_options($<$<CONFIG:RELWITHDEBINFO>:${OPTION}>)
-endforeach()
+get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(_is_multi_config)
+    # Ninja Multi-Config's built-in default omits MinSizeRel; the presets
+    # build and test that configuration, so declare it explicitly.
+    set(CMAKE_CONFIGURATION_TYPES "Debug;Release;RelWithDebInfo;MinSizeRel" CACHE STRING "" FORCE)
+endif()
 
-find_package(CLI11 CONFIG REQUIRED)
-find_package(spdlog CONFIG REQUIRED)
-find_package(7zip CONFIG REQUIRED)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(SOURCES
-    src/main.cpp
-    src/cmd/cmd.h
-    src/cmd/validators.h
-    src/cmd/validators.cpp
-    src/cmd/list/cmd_list.h
-    src/cmd/list/cmd_list.cpp
-    src/cmd/list/resources.h
-    src/cmd/list/resources.cpp
-    src/cmd/extract/cmd_extract.h
-    src/cmd/extract/cmd_extract.cpp
-    src/cmd/set/compression_type.h
-    src/cmd/set/compression_type.cpp
-    src/cmd/set/cmd_set.h
-    src/cmd/set/cmd_set.cpp
-    src/cmd/set/7z/archive_update_callback.h
-    src/cmd/set/7z/archive_update_callback.cpp
-    src/cmd/set/7z/compress_7z.h
-    src/cmd/set/7z/compress_7z.cpp
-    src/cmd/set/7z/in_mem_stream.h
-    src/cmd/set/7z/in_mem_stream.cpp
-    src/cmd/set/7z/out_mem_stream.h
-    src/cmd/set/7z/out_mem_stream.cpp
-    src/utils/guard.h
-    src/utils/iconv.h
-    src/utils/iconv.cpp
-    src/utils/init_guid.cpp
-)
+# Ninja Multi-Config nests target binary dirs under each subdirectory; force
+# every executable/DLL output to a flat build/<preset>/<Config>/ directory.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
 
-add_executable(rcedit EXCLUDE_FROM_ALL
-    ${SOURCES}
-)
+add_compile_options(/W4 /WX /guard:cf /EHsc /sdl /utf-8 /external:W0 /Zi)
+add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+add_link_options(/guard:cf)
 
-source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/src" FILES ${SOURCES})
+add_subdirectory(src)
 
-set_target_properties(rcedit
-    PROPERTIES
-        FOLDER "${ORC_ROOT_VIRTUAL_FOLDER}/Tools"
-)
-
-target_compile_definitions(rcedit
-    PRIVATE
-        UNICODE
-        NOMINMAX
-        _SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING
-)
-
-target_include_directories(rcedit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-
-target_link_libraries(rcedit
-    PRIVATE
-        7zip::7zip
-        7zip::extras
-        CLI11::CLI11
-        spdlog::spdlog
-)
+if(RCEDIT_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
