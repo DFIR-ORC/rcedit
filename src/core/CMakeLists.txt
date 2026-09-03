@@ -20,6 +20,8 @@ set(RCEDIT_CORE_SOURCES
     guard.h
     resource_id.h
     resource_id.cpp
+    codec.h
+    codec.cpp
 )
 
 add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})

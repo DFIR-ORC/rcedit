@@ -16,8 +16,8 @@ int RunVersionTests();
 int RunErrorTests();
 int RunEncodingTests();
 int RunResourceIdTests();
-// Later tasks add: RunCodecTests, RunEngineTests,
-// RunOpsTests, RunArgsTests.
+int RunCodecTests();
+// Later tasks add: RunEngineTests, RunOpsTests, RunArgsTests.
 
 struct Group
 {
@@ -30,6 +30,7 @@ constexpr Group kGroups[] = {
     { "error", RunErrorTests },
     { "encoding", RunEncodingTests },
     { "resource_id", RunResourceIdTests },
+    { "codec", RunCodecTests },
 };
 
 }  // namespace rcedit::test
