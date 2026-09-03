@@ -65,8 +65,12 @@ std::error_code MaybeDecompress( std::vector< uint8_t >& data, bool raw )
     return {};
 }
 
-// Copies 'pe' to 'output' when requested and returns the path to modify.
-std::error_code PrepareTarget(
+// Selects the path to modify ('output' if given, else 'pe') and rejects a
+// self-update target. Does not copy: callers that also have a
+// possibly-failing step before the first file mutation (e.g. Set's compress)
+// should run it between this and CopyToOutput so a doomed operation never
+// leaves a stray copy at 'output'.
+std::error_code SelectTarget(
     const fs::path& pe,
     const std::optional< fs::path >& output,
     fs::path& target )
@@ -77,19 +81,29 @@ std::error_code PrepareTarget(
         return make_error_code( errc::self_update );
     }
 
-    if( output ) {
-        std::error_code ec;
-        fs::copy_file( pe, *output, fs::copy_options::overwrite_existing, ec );
-        if( ec ) {
-            Log::Debug(
-                L"Failed to copy '{}' to '{}' [{}]",
-                pe.wstring(),
-                output->wstring(),
-                FormatError( ec ) );
-            return ec;
-        }
-    }
     return {};
+}
+
+// Copies 'pe' to 'output' when requested. Never opens 'pe' for writing.
+std::error_code CopyToOutput(
+    const fs::path& pe,
+    const std::optional< fs::path >& output )
+{
+    if( !output ) {
+        return {};
+    }
+
+    std::error_code ec;
+    fs::copy_file( pe, *output, fs::copy_options::overwrite_existing, ec );
+    if( ec ) {
+        Log::Debug(
+            L"Failed to copy '{}' to '{}' [{}]",
+            pe.wstring(),
+            output->wstring(),
+            FormatError( ec ) );
+    }
+
+    return ec;
 }
 
 }  // namespace
@@ -230,6 +244,11 @@ std::error_code Set(
         return make_error_code( errc::empty_payload );
     }
 
+    fs::path target;
+    if( const auto ec = SelectTarget( pe, output, target ) ) {
+        return ec;
+    }
+
     std::vector< uint8_t > packed;
     std::span< const uint8_t > payload = data;
     if( codecId != CodecId::None ) {
@@ -245,8 +264,7 @@ std::error_code Set(
         payload = packed;
     }
 
-    fs::path target;
-    if( const auto ec = PrepareTarget( pe, output, target ) ) {
+    if( const auto ec = CopyToOutput( pe, output ) ) {
         return ec;
     }
 
@@ -273,7 +291,11 @@ std::error_code Remove(
     const std::optional< fs::path >& output )
 {
     fs::path target;
-    if( const auto ec = PrepareTarget( pe, output, target ) ) {
+    if( const auto ec = SelectTarget( pe, output, target ) ) {
+        return ec;
+    }
+
+    if( const auto ec = CopyToOutput( pe, output ) ) {
         return ec;
     }
 

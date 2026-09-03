@@ -189,6 +189,37 @@ void SetRefusesRunningExecutable()
         Remove( *engine, self, kBaseline, std::nullopt ) == errc::self_update );
 }
 
+// R21: Set must check self_update before compressing (and therefore before
+// codec_disabled), and must not have copied to 'output' by the time it
+// fails. Only meaningful where at least one codec is disabled in this
+// build; both compiled in (the 'default' preset) has no disabled codec to
+// exercise, so this test does not exist there, mirroring how
+// DisabledCodecIsRejectedOnSet/Get are guarded.
+#if !defined( RCEDIT_HAS_ZSTD ) || !defined( RCEDIT_HAS_7Z )
+void SetErrorPrecedenceSelfUpdateBeforeCodecDisabled()
+{
+#    ifndef RCEDIT_HAS_ZSTD
+    constexpr CodecId kDisabled = CodecId::Zstd;
+#    else
+    constexpr CodecId kDisabled = CodecId::SevenZip;
+#    endif
+
+    wchar_t self[ MAX_PATH ];
+    ::GetModuleFileNameW( nullptr, self, MAX_PATH );
+    CHECK( IsRunningExecutable( self ) );
+
+    auto engine = MakeWin32Engine();
+    CHECK(
+        Set( *engine,
+             self,
+             kConfigNoLang,
+             Bytes( "x" ),
+             kDisabled,
+             std::nullopt )
+        == errc::self_update );
+}
+#endif
+
 void CompressedRoundTrip( CodecId codec )
 {
     TempDir dir;
@@ -409,6 +440,10 @@ constexpr TestCase kCases[] = {
     { "SetWithOutputLeavesSourceUnchanged",
       SetWithOutputLeavesSourceUnchanged },
     { "SetRefusesRunningExecutable", SetRefusesRunningExecutable },
+#if !defined( RCEDIT_HAS_ZSTD ) || !defined( RCEDIT_HAS_7Z )
+    { "SetErrorPrecedenceSelfUpdateBeforeCodecDisabled",
+      SetErrorPrecedenceSelfUpdateBeforeCodecDisabled },
+#endif
 #ifdef RCEDIT_HAS_ZSTD
     { "ZstdRoundTrip", ZstdRoundTrip },
 #else
