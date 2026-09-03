@@ -18,6 +18,8 @@ set(RCEDIT_CORE_SOURCES
     encoding.cpp
     format.h
     guard.h
+    resource_id.h
+    resource_id.cpp
 )
 
 add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})
