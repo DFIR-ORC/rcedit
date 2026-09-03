@@ -11,6 +11,18 @@ add_executable(rcedit
     args.cpp
     commands.h
     commands.cpp
+    Cmd/CmdCommon.h
+    Cmd/CmdCommon.cpp
+    Cmd/CmdList.h
+    Cmd/CmdList.cpp
+    Cmd/CmdGet.h
+    Cmd/CmdGet.cpp
+    Cmd/CmdSet.h
+    Cmd/CmdSet.cpp
+    Cmd/CmdRemove.h
+    Cmd/CmdRemove.cpp
+    Cmd/CmdHexdump.h
+    Cmd/CmdHexdump.cpp
 )
 
 target_link_libraries(rcedit PRIVATE rcedit_core)
