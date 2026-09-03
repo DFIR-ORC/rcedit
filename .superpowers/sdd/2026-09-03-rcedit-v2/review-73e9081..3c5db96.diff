@@ -1,0 +1,289 @@
+# Review package: 73e9081..3c5db96
+
+## Commits
+3c5db96 Harden OutMemStream against oversized declared sizes
+
+## Files changed
+ src/core/sevenzip/out_mem_stream.cpp | 14 ++++--
+ tests/CMakeLists.txt                 | 20 ++++++++
+ tests/main.cpp                       | 12 +++--
+ tests/test_sevenzip.cpp              | 88 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 127 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/src/core/sevenzip/out_mem_stream.cpp b/src/core/sevenzip/out_mem_stream.cpp
+index 634fd57..e0ef6e5 100644
+--- a/src/core/sevenzip/out_mem_stream.cpp
++++ b/src/core/sevenzip/out_mem_stream.cpp
+@@ -1,21 +1,21 @@
+ //
+ // SPDX-License-Identifier: LGPL-2.1-or-later
+ //
+ // Copyright 2026 ANSSI. All Rights Reserved.
+ //
+ // Author(s): fabienfl (ANSSI)
+ //
+ #include "core/sevenzip/out_mem_stream.h"
+ 
+ #include <cstring>
+-#include <new>
++#include <exception>
+ 
+ namespace rcedit::sevenzip {
+ 
+ OutMemStream::OutMemStream( std::vector< uint8_t >& buffer ) noexcept
+     : m_buffer( buffer )
+ {
+ }
+ 
+ Z7_COM7F_IMF(
+     OutMemStream::Write(
+@@ -32,21 +32,25 @@ Z7_COM7F_IMF(
+     if( size == 0 ) {
+         return S_OK;
+     }
+ 
+     const size_t required = m_pos + size;
+     try {
+         if( m_buffer.size() < required ) {
+             m_buffer.resize( required );
+         }
+     }
+-    catch( const std::bad_alloc& ) {
++    catch( const std::exception& ) {
++        // Also catches std::length_error: a corrupt/malicious archive can
++        // declare an unpacked size past vector::max_size(), which resize()
++        // reports via length_error rather than bad_alloc. Neither may cross
++        // the 7-Zip COM / library boundary.
+         return E_OUTOFMEMORY;
+     }
+ 
+     std::memcpy( m_buffer.data() + m_pos, data, size );
+     m_pos += size;
+     if( processedSize != nullptr ) {
+         *processedSize = size;
+     }
+     return S_OK;
+ }
+@@ -66,17 +70,21 @@ Z7_COM7F_IMF(
+         *newPosition = static_cast< UInt64 >( m_pos );
+     }
+     return S_OK;
+ }
+ 
+ Z7_COM7F_IMF( OutMemStream::SetSize( UInt64 newSize ) )
+ {
+     try {
+         m_buffer.resize( static_cast< size_t >( newSize ) );
+     }
+-    catch( const std::bad_alloc& ) {
++    catch( const std::exception& ) {
++        // Also catches std::length_error: a corrupt/malicious archive can
++        // declare an unpacked size past vector::max_size(), which resize()
++        // reports via length_error rather than bad_alloc. Neither may cross
++        // the 7-Zip COM / library boundary.
+         return E_OUTOFMEMORY;
+     }
+     return S_OK;
+ }
+ 
+ }  // namespace rcedit::sevenzip
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index b65f22f..0687b58 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -11,33 +11,53 @@ add_executable(rcedit_tests
+     main.cpp
+     test_version.cpp
+     test_error.cpp
+     test_encoding.cpp
+     test_resource_id.cpp
+     test_codec.cpp
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
++if(RCEDIT_ENABLE_7Z)
++    # test_sevenzip.cpp unit-tests OutMemStream directly (guarded by
++    # RCEDIT_HAS_7Z), so it includes core/sevenzip/out_mem_stream.h and,
++    # transitively, <7zip/7zip.h>. rcedit_core links 7zip PRIVATE, so its
++    # include dirs do not propagate here; expose the overlay port's top-level
++    # header root to this target the same way src/core does. The OutMemStream
++    # symbols themselves come from rcedit_core.lib, so no extra link is needed.
++    target_sources(rcedit_tests PRIVATE test_sevenzip.cpp)
++    find_package(7zip CONFIG REQUIRED)
++    # 7zip::7zip exposes <prefix>/include/7zip/CPP (needed by extras.h's
++    # "7zip/IPassword.h" etc.); the find_path adds <prefix>/include itself for
++    # the overlay's top-level <7zip/7zip.h>. Both mirror src/core/CMakeLists.
++    target_link_libraries(rcedit_tests PRIVATE 7zip::7zip 7zip::extras)
++    find_path(RCEDIT_7ZIP_ROOT_INCLUDE_DIR "7zip/7zip.h" REQUIRED)
++    target_include_directories(rcedit_tests PRIVATE "${RCEDIT_7ZIP_ROOT_INCLUDE_DIR}")
++endif()
++
+ if(RCEDIT_ENABLE_ZSTD)
+     # test_codec.cpp drives the raw zstd streaming API (guarded by
+     # RCEDIT_HAS_ZSTD) to build a frame without an embedded content size, to
+     # cover ZstdCodecImpl::Decompress's streaming branch. rcedit_core links
+     # zstd::libzstd_static PRIVATE, so its usage requirements (include dirs)
+     # do not propagate here; link it directly for the test target too. This
+     # does not affect the "imports" check, which inspects rcedit.exe only.
+     find_package(zstd CONFIG REQUIRED)
+     target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
+ endif()
+ 
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+ set(RCEDIT_TEST_GROUPS version error encoding resource_id codec)
++if(RCEDIT_ENABLE_7Z)
++    list(APPEND RCEDIT_TEST_GROUPS sevenzip)
++endif()
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group})
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+ 
+ function(rcedit_add_import_check target)
+     set(allowed "KERNEL32.dll")
+diff --git a/tests/main.cpp b/tests/main.cpp
+index 645d8cc..916d906 100644
+--- a/tests/main.cpp
++++ b/tests/main.cpp
+@@ -10,34 +10,38 @@
+ 
+ #include "context.h"
+ 
+ namespace rcedit::test {
+ 
+ int RunVersionTests();
+ int RunErrorTests();
+ int RunEncodingTests();
+ int RunResourceIdTests();
+ int RunCodecTests();
++#ifdef RCEDIT_HAS_7Z
++int RunSevenZipTests();
++#endif
+ // Later tasks add: RunEngineTests, RunOpsTests, RunArgsTests.
+ 
+ struct Group
+ {
+     std::string_view name;
+     int ( *run )();
+ };
+ 
+ constexpr Group kGroups[] = {
+-    { "version", RunVersionTests },
+-    { "error", RunErrorTests },
+-    { "encoding", RunEncodingTests },
+-    { "resource_id", RunResourceIdTests },
++    { "version", RunVersionTests },   { "error", RunErrorTests },
++    { "encoding", RunEncodingTests }, { "resource_id", RunResourceIdTests },
+     { "codec", RunCodecTests },
++#ifdef RCEDIT_HAS_7Z
++    { "sevenzip", RunSevenZipTests },
++#endif
+ };
+ 
+ }  // namespace rcedit::test
+ 
+ int wmain( int argc, wchar_t* argv[] )
+ {
+     using namespace rcedit::test;
+ 
+     if( argc < 2 ) {
+         std::print( stderr, "usage: rcedit_tests <group> [fixture_path]\n" );
+diff --git a/tests/test_sevenzip.cpp b/tests/test_sevenzip.cpp
+new file mode 100644
+index 0000000..3788de5
+--- /dev/null
++++ b/tests/test_sevenzip.cpp
+@@ -0,0 +1,88 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++
++#include <cstdint>
++#include <exception>
++#include <limits>
++#include <vector>
++
++#include "core/sevenzip/out_mem_stream.h"
++
++namespace rcedit::test {
++
++namespace {
++
++// A corrupt/malicious 7z archive can declare an unpacked size far past
++// std::vector<uint8_t>::max_size(). During extraction 7-Zip forwards that raw
++// UInt64 straight to IOutStream::SetSize, where vector::resize() throws
++// std::length_error (not std::bad_alloc). That exception must never escape the
++// COM / library boundary: OutMemStream must swallow it and return a FAILED
++// HRESULT so SevenZipCodecImpl::Decompress can surface a plain std::error_code.
++void OutMemStreamSetSizeRejectsOversize()
++{
++    std::vector< uint8_t > buffer;
++    sevenzip::OutMemStream stream( buffer );
++
++    HRESULT hr = S_OK;
++    try {
++        hr = stream.SetSize( ( std::numeric_limits< UInt64 >::max )() );
++    }
++    catch( const std::exception& ) {
++        // Reaching here means the exception crossed the COM boundary, which
++        // is exactly the defect under test.
++        CHECK( !"SetSize threw across the COM boundary" );
++        return;
++    }
++
++    CHECK( FAILED( hr ) );
++    CHECK( buffer.empty() );
++}
++
++// Same defense on the Write path: seek the cursor near the end of the address
++// space so Write()'s implicit grow (m_pos + size) exceeds max_size().
++void OutMemStreamWriteRejectsOversize()
++{
++    std::vector< uint8_t > buffer;
++    sevenzip::OutMemStream stream( buffer );
++
++    UInt64 newPos = 0;
++    const HRESULT seekHr = stream.Seek(
++        ( std::numeric_limits< Int64 >::max )(), STREAM_SEEK_SET, &newPos );
++    CHECK( seekHr == S_OK );
++
++    const uint8_t payload = 0x42;
++    UInt32 processed = 0xFFFFFFFFu;
++    HRESULT hr = S_OK;
++    try {
++        hr = stream.Write( &payload, 1, &processed );
++    }
++    catch( const std::exception& ) {
++        CHECK( !"Write threw across the COM boundary" );
++        return;
++    }
++
++    CHECK( FAILED( hr ) );
++    CHECK( processed == 0 );
++    CHECK( buffer.empty() );
++}
++
++constexpr TestCase kCases[] = {
++    { "OutMemStreamSetSizeRejectsOversize",
++      OutMemStreamSetSizeRejectsOversize },
++    { "OutMemStreamWriteRejectsOversize", OutMemStreamWriteRejectsOversize },
++};
++
++}  // namespace
++
++int RunSevenZipTests()
++{
++    return RunGroup( "sevenzip", kCases );
++}
++
++}  // namespace rcedit::test

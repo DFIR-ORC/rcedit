@@ -1,0 +1,537 @@
+# Review package: 89ccdcf..3e7cfed
+
+## Commits
+3e7cfed Add codec interface, magic detection and lookup
+
+## Files changed
+ src/core/CMakeLists.txt |   2 +
+ src/core/codec.cpp      | 125 +++++++++++++++++++++++++++++
+ src/core/codec.h        |  70 ++++++++++++++++
+ tests/CMakeLists.txt    |   3 +-
+ tests/main.cpp          |   5 +-
+ tests/test_codec.cpp    | 207 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 409 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 9dec3ba..2db3e40 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -13,20 +13,22 @@ set(RCEDIT_CORE_SOURCES
+     log.h
+     log.cpp
+     output.h
+     output.cpp
+     encoding.h
+     encoding.cpp
+     format.h
+     guard.h
+     resource_id.h
+     resource_id.cpp
++    codec.h
++    codec.cpp
+ )
+ 
+ add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})
+ 
+ target_include_directories(rcedit_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
+ 
+ target_compile_definitions(rcedit_core
+     PRIVATE RCEDIT_VERSION="${PROJECT_VERSION}"
+ )
+ 
+diff --git a/src/core/codec.cpp b/src/core/codec.cpp
+new file mode 100644
+index 0000000..0854fc2
+--- /dev/null
++++ b/src/core/codec.cpp
+@@ -0,0 +1,125 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "core/codec.h"
++
++#include <algorithm>
++#include <array>
++
++#include "core/encoding.h"
++#include "core/error.h"
++
++namespace rcedit {
++
++namespace {
++
++constexpr std::array< uint8_t, 6 > k7zMagic = { 0x37, 0x7A, 0xBC,
++                                                0xAF, 0x27, 0x1C };
++constexpr std::array< uint8_t, 4 > kZstdMagic = { 0x28, 0xB5, 0x2F, 0xFD };
++
++template < size_t N >
++bool StartsWith(
++    std::span< const uint8_t > data,
++    const std::array< uint8_t, N >& magic )
++{
++    return data.size() >= N
++        && std::equal( magic.begin(), magic.end(), data.begin() );
++}
++
++}  // namespace
++
++CodecId DetectCodec( std::span< const uint8_t > data ) noexcept
++{
++    if( StartsWith( data, k7zMagic ) ) {
++        return CodecId::SevenZip;
++    }
++    if( StartsWith( data, kZstdMagic ) ) {
++        return CodecId::Zstd;
++    }
++    return CodecId::None;
++}
++
++std::wstring_view CodecName( CodecId id ) noexcept
++{
++    switch( id ) {
++        case CodecId::SevenZip:
++            return L"7z";
++        case CodecId::Zstd:
++            return L"zstd";
++        case CodecId::None:
++            break;
++    }
++    return L"none";
++}
++
++std::expected< CodecId, std::error_code > ParseCodecName(
++    std::wstring_view name )
++{
++    for( const CodecId id :
++         { CodecId::None, CodecId::SevenZip, CodecId::Zstd } ) {
++        if( EqualsIgnoreCase( name, CodecName( id ) ) ) {
++            return id;
++        }
++    }
++    return std::unexpected( make_error_code( errc::unknown_codec ) );
++}
++
++bool IsCodecAvailable( CodecId id ) noexcept
++{
++    switch( id ) {
++        case CodecId::SevenZip:
++#ifdef RCEDIT_HAS_7Z
++            return true;
++#else
++            return false;
++#endif
++        case CodecId::Zstd:
++#ifdef RCEDIT_HAS_ZSTD
++            return true;
++#else
++            return false;
++#endif
++        case CodecId::None:
++            break;
++    }
++    return false;
++}
++
++std::expected< Codec*, std::error_code > FindCodec( CodecId id )
++{
++    switch( id ) {
++        case CodecId::SevenZip:
++#ifdef RCEDIT_HAS_7Z
++            return &SevenZipCodec();
++#else
++            return std::unexpected( make_error_code( errc::codec_disabled ) );
++#endif
++        case CodecId::Zstd:
++#ifdef RCEDIT_HAS_ZSTD
++            return &ZstdCodec();
++#else
++            return std::unexpected( make_error_code( errc::codec_disabled ) );
++#endif
++        case CodecId::None:
++            break;
++    }
++    return std::unexpected(
++        std::make_error_code( std::errc::invalid_argument ) );
++}
++
++std::vector< std::wstring_view > AvailableCodecNames()
++{
++    std::vector< std::wstring_view > names = { CodecName( CodecId::None ) };
++    for( const CodecId id : { CodecId::SevenZip, CodecId::Zstd } ) {
++        if( IsCodecAvailable( id ) ) {
++            names.push_back( CodecName( id ) );
++        }
++    }
++    return names;
++}
++
++}  // namespace rcedit
+diff --git a/src/core/codec.h b/src/core/codec.h
+new file mode 100644
+index 0000000..39685f7
+--- /dev/null
++++ b/src/core/codec.h
+@@ -0,0 +1,70 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <cstdint>
++#include <expected>
++#include <optional>
++#include <span>
++#include <string_view>
++#include <system_error>
++#include <vector>
++
++namespace rcedit {
++
++enum class CodecId
++{
++    None,
++    SevenZip,
++    Zstd
++};
++
++class Codec
++{
++public:
++    virtual ~Codec() = default;
++
++    [[nodiscard]] virtual CodecId Id() const noexcept = 0;
++    [[nodiscard]] virtual std::wstring_view Name() const noexcept = 0;
++
++    // Empty input is errc::empty_payload.
++    [[nodiscard]] virtual std::error_code Compress(
++        std::span< const uint8_t > input,
++        std::vector< uint8_t >& output ) = 0;
++    [[nodiscard]] virtual std::error_code Decompress(
++        std::span< const uint8_t > input,
++        std::vector< uint8_t >& output ) = 0;
++
++    // Decompressed size recorded in the container, if any.
++    [[nodiscard]] virtual std::optional< uint64_t > ContentSize(
++        std::span< const uint8_t > input ) = 0;
++};
++
++// Magic-byte detection. Always compiled, regardless of enabled codecs.
++[[nodiscard]] CodecId DetectCodec( std::span< const uint8_t > data ) noexcept;
++
++[[nodiscard]] std::wstring_view CodecName( CodecId id ) noexcept;
++[[nodiscard]] std::expected< CodecId, std::error_code > ParseCodecName(
++    std::wstring_view name );
++
++// errc::codec_disabled for a codec compiled out; std::errc::invalid_argument
++// for None.
++[[nodiscard]] std::expected< Codec*, std::error_code > FindCodec( CodecId id );
++[[nodiscard]] bool IsCodecAvailable( CodecId id ) noexcept;
++
++// "none" plus every codec compiled in, for help text.
++[[nodiscard]] std::vector< std::wstring_view > AvailableCodecNames();
++
++#ifdef RCEDIT_HAS_ZSTD
++[[nodiscard]] Codec& ZstdCodec();
++#endif
++#ifdef RCEDIT_HAS_7Z
++[[nodiscard]] Codec& SevenZipCodec();
++#endif
++
++}  // namespace rcedit
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 26bbfb0..b26c81d 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -6,26 +6,27 @@
+ # Author(s): fabienfl (ANSSI)
+ #
+ add_executable(rcedit_tests
+     check.h
+     context.h
+     main.cpp
+     test_version.cpp
+     test_error.cpp
+     test_encoding.cpp
+     test_resource_id.cpp
++    test_codec.cpp
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+-set(RCEDIT_TEST_GROUPS version error encoding resource_id)
++set(RCEDIT_TEST_GROUPS version error encoding resource_id codec)
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group})
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+ 
+ function(rcedit_add_import_check target)
+     set(allowed "KERNEL32.dll")
+diff --git a/tests/main.cpp b/tests/main.cpp
+index 4215ada..645d8cc 100644
+--- a/tests/main.cpp
++++ b/tests/main.cpp
+@@ -9,34 +9,35 @@
+ #include <string_view>
+ 
+ #include "context.h"
+ 
+ namespace rcedit::test {
+ 
+ int RunVersionTests();
+ int RunErrorTests();
+ int RunEncodingTests();
+ int RunResourceIdTests();
+-// Later tasks add: RunCodecTests, RunEngineTests,
+-// RunOpsTests, RunArgsTests.
++int RunCodecTests();
++// Later tasks add: RunEngineTests, RunOpsTests, RunArgsTests.
+ 
+ struct Group
+ {
+     std::string_view name;
+     int ( *run )();
+ };
+ 
+ constexpr Group kGroups[] = {
+     { "version", RunVersionTests },
+     { "error", RunErrorTests },
+     { "encoding", RunEncodingTests },
+     { "resource_id", RunResourceIdTests },
++    { "codec", RunCodecTests },
+ };
+ 
+ }  // namespace rcedit::test
+ 
+ int wmain( int argc, wchar_t* argv[] )
+ {
+     using namespace rcedit::test;
+ 
+     if( argc < 2 ) {
+         std::print( stderr, "usage: rcedit_tests <group> [fixture_path]\n" );
+diff --git a/tests/test_codec.cpp b/tests/test_codec.cpp
+new file mode 100644
+index 0000000..2744645
+--- /dev/null
++++ b/tests/test_codec.cpp
+@@ -0,0 +1,207 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++
++#include <algorithm>
++
++#include "core/codec.h"
++#include "core/error.h"
++
++namespace rcedit::test {
++
++namespace {
++
++std::vector< uint8_t > Pattern( size_t size )
++{
++    std::vector< uint8_t > v( size );
++    for( size_t i = 0; i < size; ++i ) {
++        v[ i ] = static_cast< uint8_t >( ( i * 7 ) % 251 );
++    }
++    return v;
++}
++
++void DetectsMagics()
++{
++    const uint8_t sevenZip[] = {
++        0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04
++    };
++    const uint8_t zstd[] = { 0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x00 };
++    const uint8_t plain[] = { 'h', 'e', 'l', 'l', 'o' };
++    const uint8_t shortSevenZip[] = { 0x37, 0x7A, 0xBC };
++
++    CHECK( DetectCodec( sevenZip ) == CodecId::SevenZip );
++    CHECK( DetectCodec( zstd ) == CodecId::Zstd );
++    CHECK( DetectCodec( plain ) == CodecId::None );
++    CHECK( DetectCodec( shortSevenZip ) == CodecId::None );
++    CHECK( DetectCodec( std::span< const uint8_t >() ) == CodecId::None );
++}
++
++void NamesRoundTrip()
++{
++    CHECK( CodecName( CodecId::None ) == L"none" );
++    CHECK( CodecName( CodecId::SevenZip ) == L"7z" );
++    CHECK( CodecName( CodecId::Zstd ) == L"zstd" );
++
++    auto a = ParseCodecName( L"7z" );
++    CHECK( a.has_value() && *a == CodecId::SevenZip );
++    auto b = ParseCodecName( L"ZSTD" );
++    CHECK( b.has_value() && *b == CodecId::Zstd );
++    auto c = ParseCodecName( L"none" );
++    CHECK( c.has_value() && *c == CodecId::None );
++    auto d = ParseCodecName( L"lz4" );
++    CHECK( !d.has_value() && d.error() == errc::unknown_codec );
++}
++
++void FindCodecMatchesBuildFlags()
++{
++    // R18: FindCodec(CodecId::None) is documented to return
++    // std::errc::invalid_argument (see codec.h), not merely "an error".
++    auto none = FindCodec( CodecId::None );
++    CHECK(
++        !none.has_value()
++        && none.error()
++            == std::make_error_code( std::errc::invalid_argument ) );
++
++    auto z = FindCodec( CodecId::Zstd );
++#ifdef RCEDIT_HAS_ZSTD
++    CHECK(
++        z.has_value() && ( *z )->Id() == CodecId::Zstd
++        && ( *z )->Name() == L"zstd" );
++    CHECK( IsCodecAvailable( CodecId::Zstd ) );
++#else
++    CHECK( !z.has_value() && z.error() == errc::codec_disabled );
++    CHECK( !IsCodecAvailable( CodecId::Zstd ) );
++#endif
++
++    auto s = FindCodec( CodecId::SevenZip );
++#ifdef RCEDIT_HAS_7Z
++    CHECK(
++        s.has_value() && ( *s )->Id() == CodecId::SevenZip
++        && ( *s )->Name() == L"7z" );
++    CHECK( IsCodecAvailable( CodecId::SevenZip ) );
++#else
++    CHECK( !s.has_value() && s.error() == errc::codec_disabled );
++    CHECK( !IsCodecAvailable( CodecId::SevenZip ) );
++#endif
++}
++
++void AvailableNamesListOnlyCompiledCodecs()
++{
++    const auto names = AvailableCodecNames();
++    CHECK( !names.empty() && names.front() == L"none" );
++    const bool hasZstd = std::ranges::find( names, L"zstd" ) != names.end();
++    const bool has7z = std::ranges::find( names, L"7z" ) != names.end();
++#ifdef RCEDIT_HAS_ZSTD
++    CHECK( hasZstd );
++#else
++    CHECK( !hasZstd );
++#endif
++#ifdef RCEDIT_HAS_7Z
++    CHECK( has7z );
++#else
++    CHECK( !has7z );
++#endif
++}
++
++// Shared by the zstd and 7z cases below.
++void RoundTrip( Codec& codec )
++{
++    for( const size_t size :
++         { size_t( 1 ), size_t( 100 ), size_t( 1u << 20 ) } ) {
++        const auto input = Pattern( size );
++        std::vector< uint8_t > packed;
++        CHECK_EC_OK( codec.Compress( input, packed ) );
++        CHECK( !packed.empty() );
++        CHECK( DetectCodec( packed ) == codec.Id() );
++
++        const auto content = codec.ContentSize( packed );
++        CHECK( content.has_value() && *content == size );
++
++        std::vector< uint8_t > unpacked;
++        CHECK_EC_OK( codec.Decompress( packed, unpacked ) );
++        CHECK( unpacked == input );
++    }
++}
++
++void RejectsEmptyInput( Codec& codec )
++{
++    std::vector< uint8_t > out;
++    const auto ec = codec.Compress( std::span< const uint8_t >(), out );
++    CHECK( ec == errc::empty_payload );
++}
++
++void RejectsCorruptInput( Codec& codec )
++{
++    const auto input = Pattern( 1000 );
++    std::vector< uint8_t > packed;
++    CHECK_EC_OK( codec.Compress( input, packed ) );
++    // Keep the magic, trash the rest.
++    for( size_t i = 8; i < packed.size(); ++i ) {
++        packed[ i ] = static_cast< uint8_t >( ~packed[ i ] );
++    }
++    std::vector< uint8_t > out;
++    const auto ec = codec.Decompress( packed, out );
++    CHECK( static_cast< bool >( ec ) );
++}
++
++#ifdef RCEDIT_HAS_ZSTD
++void ZstdRoundTrip()
++{
++    RoundTrip( ZstdCodec() );
++}
++void ZstdRejectsEmpty()
++{
++    RejectsEmptyInput( ZstdCodec() );
++}
++void ZstdRejectsCorrupt()
++{
++    RejectsCorruptInput( ZstdCodec() );
++}
++#endif
++
++#ifdef RCEDIT_HAS_7Z
++void SevenZipRoundTrip()
++{
++    RoundTrip( SevenZipCodec() );
++}
++void SevenZipRejectsEmpty()
++{
++    RejectsEmptyInput( SevenZipCodec() );
++}
++void SevenZipRejectsCorrupt()
++{
++    RejectsCorruptInput( SevenZipCodec() );
++}
++#endif
++
++constexpr TestCase kCases[] = {
++    { "DetectsMagics", DetectsMagics },
++    { "NamesRoundTrip", NamesRoundTrip },
++    { "FindCodecMatchesBuildFlags", FindCodecMatchesBuildFlags },
++    { "AvailableNamesListOnlyCompiledCodecs",
++      AvailableNamesListOnlyCompiledCodecs },
++#ifdef RCEDIT_HAS_ZSTD
++    { "ZstdRoundTrip", ZstdRoundTrip },
++    { "ZstdRejectsEmpty", ZstdRejectsEmpty },
++    { "ZstdRejectsCorrupt", ZstdRejectsCorrupt },
++#endif
++#ifdef RCEDIT_HAS_7Z
++    { "SevenZipRoundTrip", SevenZipRoundTrip },
++    { "SevenZipRejectsEmpty", SevenZipRejectsEmpty },
++    { "SevenZipRejectsCorrupt", SevenZipRejectsCorrupt },
++#endif
++};
++
++}  // namespace
++
++int RunCodecTests()
++{
++    return RunGroup( "codec", kCases );
++}
++
++}  // namespace rcedit::test

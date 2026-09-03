@@ -1,0 +1,263 @@
+# Review package: 7d5531a..e861749
+
+## Commits
+e861749 Fix zstd streaming decompress silently truncating corrupt frames
+
+## Files changed
+ src/core/codec_zstd.cpp | 17 +++++++++--
+ tests/CMakeLists.txt    | 11 +++++++
+ tests/test_codec.cpp    | 80 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 106 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/core/codec_zstd.cpp b/src/core/codec_zstd.cpp
+index b9b7c3f..26cca0e 100644
+--- a/src/core/codec_zstd.cpp
++++ b/src/core/codec_zstd.cpp
+@@ -137,44 +137,57 @@ std::error_code ZstdCodecImpl::Decompress(
+         if( ZSTD_isError( actual ) ) {
+             Log::Debug(
+                 L"Failed ZSTD_decompressDCtx [{}]", ZstdErrorName( actual ) );
+             return make_error_code( errc::corrupt_payload );
+         }
+         result.resize( actual );
+         output = std::move( result );
+         return {};
+     }
+ 
+-    // Frame without a recorded content size: streaming loop.
++    // Frame without a recorded content size: streaming loop. Track the last
++    // ZSTD_decompressStream return: it is a hint (not an error caught by
++    // ZSTD_isError) that is 0 only once the frame is fully reconstructed, and
++    // > 0 while more input is still expected. Exiting the loop because input
++    // ran out (in.pos == in.size) with a non-zero last return means the frame
++    // was truncated, which must be reported as corrupt, not as a silently
++    // short decompression.
+     ZSTD_inBuffer in{ input.data(), input.size(), 0 };
+     std::vector< uint8_t > chunk( ZSTD_DStreamOutSize() );
++    // Non-zero sentinel: input is non-empty (checked above), so the loop
++    // below always runs at least once and overwrites this before use.
++    size_t rc = 1;
+     while( in.pos < in.size ) {
+         ZSTD_outBuffer out{ chunk.data(), chunk.size(), 0 };
+-        const size_t rc = ZSTD_decompressStream( dctx.get(), &out, &in );
++        rc = ZSTD_decompressStream( dctx.get(), &out, &in );
+         if( ZSTD_isError( rc ) ) {
+             Log::Debug(
+                 L"Failed ZSTD_decompressStream [{}]", ZstdErrorName( rc ) );
+             return make_error_code( errc::corrupt_payload );
+         }
+         try {
+             result.insert(
+                 result.end(),
+                 chunk.begin(),
+                 chunk.begin() + static_cast< ptrdiff_t >( out.pos ) );
+         }
+         catch( const std::bad_alloc& ) {
+             return std::make_error_code( std::errc::not_enough_memory );
+         }
+         if( rc == 0 ) {
+             break;
+         }
+     }
++    if( rc != 0 ) {
++        Log::Debug( L"Truncated zstd frame: input exhausted before frame end" );
++        return make_error_code( errc::corrupt_payload );
++    }
+ 
+     output = std::move( result );
+     return {};
+ }
+ 
+ Codec& ZstdCodec()
+ {
+     static ZstdCodecImpl codec;
+     return codec;
+ }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index b26c81d..b65f22f 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -11,20 +11,31 @@ add_executable(rcedit_tests
+     main.cpp
+     test_version.cpp
+     test_error.cpp
+     test_encoding.cpp
+     test_resource_id.cpp
+     test_codec.cpp
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
++if(RCEDIT_ENABLE_ZSTD)
++    # test_codec.cpp drives the raw zstd streaming API (guarded by
++    # RCEDIT_HAS_ZSTD) to build a frame without an embedded content size, to
++    # cover ZstdCodecImpl::Decompress's streaming branch. rcedit_core links
++    # zstd::libzstd_static PRIVATE, so its usage requirements (include dirs)
++    # do not propagate here; link it directly for the test target too. This
++    # does not affect the "imports" check, which inspects rcedit.exe only.
++    find_package(zstd CONFIG REQUIRED)
++    target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
++endif()
++
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+ set(RCEDIT_TEST_GROUPS version error encoding resource_id codec)
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group})
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+ 
+diff --git a/tests/test_codec.cpp b/tests/test_codec.cpp
+index 2744645..5016c80 100644
+--- a/tests/test_codec.cpp
++++ b/tests/test_codec.cpp
+@@ -1,24 +1,29 @@
+ //
+ // SPDX-License-Identifier: LGPL-2.1-or-later
+ //
+ // Copyright 2026 ANSSI. All Rights Reserved.
+ //
+ // Author(s): fabienfl (ANSSI)
+ //
+ #include "check.h"
+ 
+ #include <algorithm>
++#include <memory>
+ 
+ #include "core/codec.h"
+ #include "core/error.h"
+ 
++#ifdef RCEDIT_HAS_ZSTD
++#    include <zstd.h>
++#endif
++
+ namespace rcedit::test {
+ 
+ namespace {
+ 
+ std::vector< uint8_t > Pattern( size_t size )
+ {
+     std::vector< uint8_t > v( size );
+     for( size_t i = 0; i < size; ++i ) {
+         v[ i ] = static_cast< uint8_t >( ( i * 7 ) % 251 );
+     }
+@@ -155,20 +160,92 @@ void ZstdRoundTrip()
+     RoundTrip( ZstdCodec() );
+ }
+ void ZstdRejectsEmpty()
+ {
+     RejectsEmptyInput( ZstdCodec() );
+ }
+ void ZstdRejectsCorrupt()
+ {
+     RejectsCorruptInput( ZstdCodec() );
+ }
++
++// Builds a valid zstd frame that omits the embedded content size.
++// ZstdCodecImpl::Compress always goes through ZSTD_compress2, which pledges
++// the size and so always produces a frame with a known content size; the
++// only way to reach the codec's "unknown content size" decompression branch
++// is to feed it a frame built like this one. Note: neither leaving the
++// pledged size unset nor explicitly pledging ZSTD_CONTENTSIZE_UNKNOWN is
++// sufficient here — zstd's internal representation of "unknown" for the
++// pledge (pledgedSrcSize+1 wrapping to 0) is indistinguishable from "no
++// pledge given", and with the *entire* input handed over in a single
++// ZSTD_e_end call zstd auto-infers and writes the size anyway. The only
++// reliable way to suppress the header field is ZSTD_c_contentSizeFlag=0.
++std::vector< uint8_t > CompressStreamingNoContentSize(
++    std::span< const uint8_t > input )
++{
++    struct CCtxDeleter
++    {
++        void operator()( ZSTD_CCtx* p ) const noexcept { ZSTD_freeCCtx( p ); }
++    };
++    std::unique_ptr< ZSTD_CCtx, CCtxDeleter > cctx( ZSTD_createCCtx() );
++    CHECK( cctx != nullptr );
++
++    const size_t flagRc =
++        ZSTD_CCtx_setParameter( cctx.get(), ZSTD_c_contentSizeFlag, 0 );
++    CHECK( !ZSTD_isError( flagRc ) );
++
++    std::vector< uint8_t > out( ZSTD_compressBound( input.size() ) + 64 );
++    ZSTD_inBuffer in{ input.data(), input.size(), 0 };
++    ZSTD_outBuffer outBuf{ out.data(), out.size(), 0 };
++    const size_t rc =
++        ZSTD_compressStream2( cctx.get(), &outBuf, &in, ZSTD_e_end );
++    CHECK( !ZSTD_isError( rc ) );
++    CHECK( rc == 0 );  // fully flushed in this single call
++    out.resize( outBuf.pos );
++    return out;
++}
++
++void ZstdStreamingFrameRoundTrip()
++{
++    const auto input = Pattern( 5000 );
++    const auto packed = CompressStreamingNoContentSize( input );
++    CHECK( !packed.empty() );
++    CHECK( DetectCodec( packed ) == CodecId::Zstd );
++
++    // No embedded content size: ContentSize() must report unknown, which is
++    // what routes Decompress() through the streaming branch under test.
++    CHECK( !ZstdCodec().ContentSize( packed ).has_value() );
++
++    std::vector< uint8_t > unpacked;
++    CHECK_EC_OK( ZstdCodec().Decompress( packed, unpacked ) );
++    CHECK( unpacked == input );
++}
++
++void ZstdStreamingFrameRejectsTruncation()
++{
++    const auto input = Pattern( 5000 );
++    const auto packed = CompressStreamingNoContentSize( input );
++    CHECK( !ZstdCodec().ContentSize( packed ).has_value() );
++    CHECK( packed.size() > 100 );
++
++    // Cut the frame well before its end. ZSTD_decompressStream runs out of
++    // input while it still expects more (a non-zero, non-error return); the
++    // codec must surface that as corrupt_payload, not a silently short
++    // decompression.
++    std::vector< uint8_t > truncated(
++        packed.begin(),
++        packed.begin() + static_cast< ptrdiff_t >( packed.size() / 2 ) );
++
++    std::vector< uint8_t > out;
++    const auto ec = ZstdCodec().Decompress( truncated, out );
++    CHECK( ec == errc::corrupt_payload );
++}
+ #endif
+ 
+ #ifdef RCEDIT_HAS_7Z
+ void SevenZipRoundTrip()
+ {
+     RoundTrip( SevenZipCodec() );
+ }
+ void SevenZipRejectsEmpty()
+ {
+     RejectsEmptyInput( SevenZipCodec() );
+@@ -182,20 +259,23 @@ void SevenZipRejectsCorrupt()
+ constexpr TestCase kCases[] = {
+     { "DetectsMagics", DetectsMagics },
+     { "NamesRoundTrip", NamesRoundTrip },
+     { "FindCodecMatchesBuildFlags", FindCodecMatchesBuildFlags },
+     { "AvailableNamesListOnlyCompiledCodecs",
+       AvailableNamesListOnlyCompiledCodecs },
+ #ifdef RCEDIT_HAS_ZSTD
+     { "ZstdRoundTrip", ZstdRoundTrip },
+     { "ZstdRejectsEmpty", ZstdRejectsEmpty },
+     { "ZstdRejectsCorrupt", ZstdRejectsCorrupt },
++    { "ZstdStreamingFrameRoundTrip", ZstdStreamingFrameRoundTrip },
++    { "ZstdStreamingFrameRejectsTruncation",
++      ZstdStreamingFrameRejectsTruncation },
+ #endif
+ #ifdef RCEDIT_HAS_7Z
+     { "SevenZipRoundTrip", SevenZipRoundTrip },
+     { "SevenZipRejectsEmpty", SevenZipRejectsEmpty },
+     { "SevenZipRejectsCorrupt", SevenZipRejectsCorrupt },
+ #endif
+ };
+ 
+ }  // namespace
+ 

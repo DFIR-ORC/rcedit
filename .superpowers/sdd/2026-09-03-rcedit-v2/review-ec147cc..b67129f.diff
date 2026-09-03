@@ -1,0 +1,943 @@
+# Review package: ec147cc..b67129f
+
+## Commits
+b67129f Add error category, logging, output, encoding and guards
+
+## Files changed
+ src/core/CMakeLists.txt |  10 ++++
+ src/core/encoding.cpp   | 132 ++++++++++++++++++++++++++++++++++++++++++++++++
+ src/core/encoding.h     |  31 ++++++++++++
+ src/core/error.cpp      |  77 ++++++++++++++++++++++++++++
+ src/core/error.h        |  41 +++++++++++++++
+ src/core/format.h       |  38 ++++++++++++++
+ src/core/guard.h        |  57 +++++++++++++++++++++
+ src/core/log.cpp        |  59 ++++++++++++++++++++++
+ src/core/log.h          |  63 +++++++++++++++++++++++
+ src/core/output.cpp     |  26 ++++++++++
+ src/core/output.h       |  27 ++++++++++
+ tests/CMakeLists.txt    |   4 +-
+ tests/main.cpp          |   8 ++-
+ tests/test_encoding.cpp |  92 +++++++++++++++++++++++++++++++++
+ tests/test_error.cpp    |  93 ++++++++++++++++++++++++++++++++++
+ 15 files changed, 755 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index deffe9d..156d966 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -1,20 +1,30 @@
+ #
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ #
+ # Copyright 2026 ANSSI. All Rights Reserved.
+ #
+ # Author(s): fabienfl (ANSSI)
+ #
+ set(RCEDIT_CORE_SOURCES
+     version.h
+     version.cpp
++    error.h
++    error.cpp
++    log.h
++    log.cpp
++    output.h
++    output.cpp
++    encoding.h
++    encoding.cpp
++    format.h
++    guard.h
+ )
+ 
+ add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})
+ 
+ target_include_directories(rcedit_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
+ 
+ target_compile_definitions(rcedit_core
+     PRIVATE RCEDIT_VERSION="${PROJECT_VERSION}"
+ )
+ 
+diff --git a/src/core/encoding.cpp b/src/core/encoding.cpp
+new file mode 100644
+index 0000000..c91d5ed
+--- /dev/null
++++ b/src/core/encoding.cpp
+@@ -0,0 +1,132 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "core/encoding.h"
++
++#include <windows.h>
++
++#include <cwctype>
++
++#include "core/error.h"
++
++namespace rcedit {
++
++std::expected< std::string, std::error_code > Utf16ToUtf8(
++    std::wstring_view input )
++{
++    if( input.empty() ) {
++        return std::string();
++    }
++
++    const int size = ::WideCharToMultiByte(
++        CP_UTF8,
++        WC_ERR_INVALID_CHARS,
++        input.data(),
++        static_cast< int >( input.size() ),
++        nullptr,
++        0,
++        nullptr,
++        nullptr );
++    if( size <= 0 ) {
++        return std::unexpected( LastWin32Error() );
++    }
++
++    std::string out( static_cast< size_t >( size ), '\0' );
++    const int written = ::WideCharToMultiByte(
++        CP_UTF8,
++        WC_ERR_INVALID_CHARS,
++        input.data(),
++        static_cast< int >( input.size() ),
++        out.data(),
++        size,
++        nullptr,
++        nullptr );
++    if( written != size ) {
++        return std::unexpected( LastWin32Error() );
++    }
++
++    return out;
++}
++
++std::expected< std::wstring, std::error_code > Utf8ToUtf16(
++    std::string_view input )
++{
++    if( input.empty() ) {
++        return std::wstring();
++    }
++
++    const int size = ::MultiByteToWideChar(
++        CP_UTF8,
++        MB_ERR_INVALID_CHARS,
++        input.data(),
++        static_cast< int >( input.size() ),
++        nullptr,
++        0 );
++    if( size <= 0 ) {
++        return std::unexpected( LastWin32Error() );
++    }
++
++    std::wstring out( static_cast< size_t >( size ), L'\0' );
++    const int written = ::MultiByteToWideChar(
++        CP_UTF8,
++        MB_ERR_INVALID_CHARS,
++        input.data(),
++        static_cast< int >( input.size() ),
++        out.data(),
++        size );
++    if( written != size ) {
++        return std::unexpected( LastWin32Error() );
++    }
++
++    return out;
++}
++
++std::wstring AnsiToUtf16( std::string_view input )
++{
++    if( input.empty() ) {
++        return {};
++    }
++
++    const int size = ::MultiByteToWideChar(
++        CP_ACP,
++        0,
++        input.data(),
++        static_cast< int >( input.size() ),
++        nullptr,
++        0 );
++    if( size <= 0 ) {
++        return L"<unconvertible>";
++    }
++
++    std::wstring out( static_cast< size_t >( size ), L'\0' );
++    ::MultiByteToWideChar(
++        CP_ACP,
++        0,
++        input.data(),
++        static_cast< int >( input.size() ),
++        out.data(),
++        size );
++    return out;
++}
++
++bool EqualsIgnoreCase( std::wstring_view a, std::wstring_view b ) noexcept
++{
++    if( a.size() != b.size() ) {
++        return false;
++    }
++
++    for( size_t i = 0; i < a.size(); ++i ) {
++        if( std::towlower( static_cast< wint_t >( a[ i ] ) )
++            != std::towlower( static_cast< wint_t >( b[ i ] ) ) ) {
++            return false;
++        }
++    }
++
++    return true;
++}
++
++}  // namespace rcedit
+diff --git a/src/core/encoding.h b/src/core/encoding.h
+new file mode 100644
+index 0000000..2f4f418
+--- /dev/null
++++ b/src/core/encoding.h
+@@ -0,0 +1,31 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <expected>
++#include <string>
++#include <string_view>
++#include <system_error>
++
++namespace rcedit {
++
++[[nodiscard]] std::expected< std::string, std::error_code > Utf16ToUtf8(
++    std::wstring_view input );
++[[nodiscard]] std::expected< std::wstring, std::error_code > Utf8ToUtf16(
++    std::string_view input );
++
++// Lossy conversion of an ANSI code page string (e.g.
++// std::error_code::message()).
++[[nodiscard]] std::wstring AnsiToUtf16( std::string_view input );
++
++// Case-insensitive comparison of two UTF-16 strings (folded with towlower).
++[[nodiscard]] bool EqualsIgnoreCase(
++    std::wstring_view a,
++    std::wstring_view b ) noexcept;
++
++}  // namespace rcedit
+diff --git a/src/core/error.cpp b/src/core/error.cpp
+new file mode 100644
+index 0000000..cfbf319
+--- /dev/null
++++ b/src/core/error.cpp
+@@ -0,0 +1,77 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "core/error.h"
++
++#include <windows.h>
++
++namespace rcedit {
++
++namespace {
++
++class RceditCategory final : public std::error_category
++{
++public:
++    const char* name() const noexcept override { return "rcedit"; }
++
++    std::string message( int value ) const override
++    {
++        switch( static_cast< errc >( value ) ) {
++            case errc::invalid_identifier:
++                return "invalid resource identifier";
++            case errc::invalid_language:
++                return "invalid language identifier";
++            case errc::unknown_codec:
++                return "unknown codec";
++            case errc::codec_disabled:
++                return "codec disabled in this build";
++            case errc::resource_not_found:
++                return "resource not found";
++            case errc::ambiguous_language:
++                return "several languages match, specify --lang";
++            case errc::read_only:
++                return "engine opened read-only";
++            case errc::self_update:
++                return "refusing to modify the running executable";
++            case errc::corrupt_payload:
++                return "compressed payload is corrupt";
++            case errc::empty_payload:
++                return "payload is empty";
++        }
++        return "unknown rcedit error";
++    }
++};
++
++}  // namespace
++
++const std::error_category& rcedit_category() noexcept
++{
++    static const RceditCategory category;
++    return category;
++}
++
++std::error_code make_error_code( errc e ) noexcept
++{
++    return { static_cast< int >( e ), rcedit_category() };
++}
++
++std::error_code Win32Error( unsigned long code ) noexcept
++{
++    return { static_cast< int >( code ), std::system_category() };
++}
++
++std::error_code LastWin32Error() noexcept
++{
++    return Win32Error( ::GetLastError() );
++}
++
++std::error_code HResultError( long hr ) noexcept
++{
++    return { static_cast< int >( hr ), std::system_category() };
++}
++
++}  // namespace rcedit
+diff --git a/src/core/error.h b/src/core/error.h
+new file mode 100644
+index 0000000..eca073a
+--- /dev/null
++++ b/src/core/error.h
+@@ -0,0 +1,41 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <system_error>
++#include <type_traits>
++
++namespace rcedit {
++
++enum class errc
++{
++    invalid_identifier = 1,
++    invalid_language,
++    unknown_codec,
++    codec_disabled,
++    resource_not_found,
++    ambiguous_language,
++    read_only,
++    self_update,
++    corrupt_payload,
++    empty_payload,
++};
++
++[[nodiscard]] const std::error_category& rcedit_category() noexcept;
++[[nodiscard]] std::error_code make_error_code( errc e ) noexcept;
++
++[[nodiscard]] std::error_code Win32Error( unsigned long code ) noexcept;
++[[nodiscard]] std::error_code LastWin32Error() noexcept;
++[[nodiscard]] std::error_code HResultError( long hr ) noexcept;
++
++}  // namespace rcedit
++
++template <>
++struct std::is_error_code_enum< rcedit::errc > : std::true_type
++{
++};
+diff --git a/src/core/format.h b/src/core/format.h
+new file mode 100644
+index 0000000..8e9c838
+--- /dev/null
++++ b/src/core/format.h
+@@ -0,0 +1,38 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <format>
++#include <string>
++#include <system_error>
++
++#include "core/encoding.h"
++
++namespace rcedit {
++
++// "0x2: The system cannot find the file specified." for system errors,
++// "rcedit: codec disabled in this build" for rcedit errors.
++[[nodiscard]] inline std::wstring FormatError( const std::error_code& ec )
++{
++    std::wstring message = AnsiToUtf16( ec.message() );
++    while( !message.empty()
++           && ( message.back() == L'\r' || message.back() == L'\n'
++                || message.back() == L' ' ) ) {
++        message.pop_back();
++    }
++
++    if( ec.category() == std::system_category() ) {
++        return std::format(
++            L"{:#x}: {}", static_cast< unsigned long >( ec.value() ), message );
++    }
++
++    return std::format(
++        L"{}: {}", AnsiToUtf16( ec.category().name() ), message );
++}
++
++}  // namespace rcedit
+diff --git a/src/core/guard.h b/src/core/guard.h
+new file mode 100644
+index 0000000..ef588ec
+--- /dev/null
++++ b/src/core/guard.h
+@@ -0,0 +1,57 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <memory>
++
++#include <windows.h>
++
++namespace rcedit {
++
++struct ModuleDeleter
++{
++    void operator()( HMODULE h ) const noexcept
++    {
++        if( h != nullptr ) {
++            ::FreeLibrary( h );
++        }
++    }
++};
++using ModuleHandle =
++    std::unique_ptr< std::remove_pointer_t< HMODULE >, ModuleDeleter >;
++
++struct FileHandleDeleter
++{
++    void operator()( HANDLE h ) const noexcept
++    {
++        if( h != nullptr && h != INVALID_HANDLE_VALUE ) {
++            ::CloseHandle( h );
++        }
++    }
++};
++// Holds a HANDLE from CreateFile; INVALID_HANDLE_VALUE and nullptr are both
++// "empty".
++class FileHandle
++{
++public:
++    FileHandle() = default;
++    explicit FileHandle( HANDLE h ) noexcept
++        : m_handle( h == INVALID_HANDLE_VALUE ? nullptr : h )
++    {
++    }
++    [[nodiscard]] HANDLE get() const noexcept { return m_handle.get(); }
++    [[nodiscard]] explicit operator bool() const noexcept
++    {
++        return m_handle != nullptr;
++    }
++
++private:
++    std::unique_ptr< void, FileHandleDeleter > m_handle;
++};
++
++}  // namespace rcedit
+diff --git a/src/core/log.cpp b/src/core/log.cpp
+new file mode 100644
+index 0000000..7378b39
+--- /dev/null
++++ b/src/core/log.cpp
+@@ -0,0 +1,59 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "core/log.h"
++
++#include <cstdio>
++#include <print>
++
++#include "core/encoding.h"
++
++namespace rcedit::Log {
++
++namespace {
++
++Level g_level = Level::Info;
++
++constexpr char Tag( Level level )
++{
++    switch( level ) {
++        case Level::Debug:
++            return 'D';
++        case Level::Info:
++            return 'I';
++        case Level::Warn:
++            return 'W';
++        case Level::Error:
++            return 'E';
++    }
++    return '?';
++}
++
++}  // namespace
++
++void SetLevel( Level level ) noexcept
++{
++    g_level = level;
++}
++
++Level GetLevel() noexcept
++{
++    return g_level;
++}
++
++void Write( Level level, std::wstring_view message )
++{
++    const auto utf8 = Utf16ToUtf8( message );
++    std::print(
++        stderr,
++        "[{}] {}\n",
++        Tag( level ),
++        utf8 ? *utf8 : std::string( "<unencodable message>" ) );
++    std::fflush( stderr );
++}
++
++}  // namespace rcedit::Log
+diff --git a/src/core/log.h b/src/core/log.h
+new file mode 100644
+index 0000000..57271cb
+--- /dev/null
++++ b/src/core/log.h
+@@ -0,0 +1,63 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <format>
++#include <string_view>
++#include <utility>
++
++namespace rcedit::Log {
++
++enum class Level
++{
++    Debug = 0,
++    Info,
++    Warn,
++    Error
++};
++
++void SetLevel( Level level ) noexcept;
++[[nodiscard]] Level GetLevel() noexcept;
++
++// Writes "[X] message\n" to stderr as UTF-8. Not for program output.
++void Write( Level level, std::wstring_view message );
++
++template < typename... Args >
++void Debug( std::wformat_string< Args... > fmt, Args&&... args )
++{
++    if( GetLevel() <= Level::Debug ) {
++        Write(
++            Level::Debug, std::format( fmt, std::forward< Args >( args )... ) );
++    }
++}
++
++template < typename... Args >
++void Info( std::wformat_string< Args... > fmt, Args&&... args )
++{
++    if( GetLevel() <= Level::Info ) {
++        Write(
++            Level::Info, std::format( fmt, std::forward< Args >( args )... ) );
++    }
++}
++
++template < typename... Args >
++void Warn( std::wformat_string< Args... > fmt, Args&&... args )
++{
++    if( GetLevel() <= Level::Warn ) {
++        Write(
++            Level::Warn, std::format( fmt, std::forward< Args >( args )... ) );
++    }
++}
++
++template < typename... Args >
++void Error( std::wformat_string< Args... > fmt, Args&&... args )
++{
++    Write( Level::Error, std::format( fmt, std::forward< Args >( args )... ) );
++}
++
++}  // namespace rcedit::Log
+diff --git a/src/core/output.cpp b/src/core/output.cpp
+new file mode 100644
+index 0000000..56429ed
+--- /dev/null
++++ b/src/core/output.cpp
+@@ -0,0 +1,26 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "core/output.h"
++
++#include <cstdio>
++
++#include "core/encoding.h"
++
++namespace rcedit::Out {
++
++void Write( std::wstring_view text )
++{
++    const auto utf8 = Utf16ToUtf8( text );
++    if( !utf8 ) {
++        std::fputs( "<unencodable output>", stdout );
++        return;
++    }
++    std::fwrite( utf8->data(), 1, utf8->size(), stdout );
++}
++
++}  // namespace rcedit::Out
+diff --git a/src/core/output.h b/src/core/output.h
+new file mode 100644
+index 0000000..d21a33a
+--- /dev/null
++++ b/src/core/output.h
+@@ -0,0 +1,27 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <format>
++#include <string_view>
++#include <utility>
++
++namespace rcedit::Out {
++
++// Program output: UTF-8 to stdout, no decoration.
++void Write( std::wstring_view text );
++
++template < typename... Args >
++void Print( std::wformat_string< Args... > fmt, Args&&... args )
++{
++    Write(
++        std::wstring_view(
++            std::format( fmt, std::forward< Args >( args )... ) ) );
++}
++
++}  // namespace rcedit::Out
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index aa58c0d..c7dcff3 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -3,26 +3,28 @@
+ #
+ # Copyright 2026 ANSSI. All Rights Reserved.
+ #
+ # Author(s): fabienfl (ANSSI)
+ #
+ add_executable(rcedit_tests
+     check.h
+     context.h
+     main.cpp
+     test_version.cpp
++    test_error.cpp
++    test_encoding.cpp
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+-set(RCEDIT_TEST_GROUPS version)
++set(RCEDIT_TEST_GROUPS version error encoding)
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group})
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+ 
+ function(rcedit_add_import_check target)
+     set(allowed "KERNEL32.dll")
+diff --git a/tests/main.cpp b/tests/main.cpp
+index 486dc8a..031099d 100644
+--- a/tests/main.cpp
++++ b/tests/main.cpp
+@@ -6,31 +6,35 @@
+ // Author(s): fabienfl (ANSSI)
+ //
+ #include <print>
+ #include <string_view>
+ 
+ #include "context.h"
+ 
+ namespace rcedit::test {
+ 
+ int RunVersionTests();
+-// Later tasks add: RunErrorTests, RunEncodingTests, RunResourceIdTests,
+-// RunCodecTests, RunEngineTests, RunOpsTests, RunArgsTests.
++int RunErrorTests();
++int RunEncodingTests();
++// Later tasks add: RunResourceIdTests, RunCodecTests, RunEngineTests,
++// RunOpsTests, RunArgsTests.
+ 
+ struct Group
+ {
+     std::string_view name;
+     int ( *run )();
+ };
+ 
+ constexpr Group kGroups[] = {
+     { "version", RunVersionTests },
++    { "error", RunErrorTests },
++    { "encoding", RunEncodingTests },
+ };
+ 
+ }  // namespace rcedit::test
+ 
+ int wmain( int argc, wchar_t* argv[] )
+ {
+     using namespace rcedit::test;
+ 
+     if( argc < 2 ) {
+         std::print( stderr, "usage: rcedit_tests <group> [fixture_path]\n" );
+diff --git a/tests/test_encoding.cpp b/tests/test_encoding.cpp
+new file mode 100644
+index 0000000..0bb5f48
+--- /dev/null
++++ b/tests/test_encoding.cpp
+@@ -0,0 +1,92 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++
++#include "core/encoding.h"
++
++namespace rcedit::test {
++
++namespace {
++
++void RoundTripsAscii()
++{
++    auto utf8 = Utf16ToUtf8( L"hello" );
++    CHECK( utf8.has_value() );
++    CHECK( *utf8 == "hello" );
++    auto back = Utf8ToUtf16( *utf8 );
++    CHECK( back.has_value() );
++    CHECK( *back == L"hello" );
++}
++
++void RoundTripsNonAscii()
++{
++    const std::wstring w = L"café 日本";
++    auto utf8 = Utf16ToUtf8( w );
++    CHECK( utf8.has_value() );
++    CHECK( utf8->size() == 4 + 1 + 1 + 6 );
++    auto back = Utf8ToUtf16( *utf8 );
++    CHECK( back.has_value() );
++    CHECK( *back == w );
++}
++
++void EmptyIsEmpty()
++{
++    auto a = Utf16ToUtf8( L"" );
++    CHECK( a.has_value() && a->empty() );
++    auto b = Utf8ToUtf16( "" );
++    CHECK( b.has_value() && b->empty() );
++}
++
++void RejectsInvalidUtf8()
++{
++    const char bad[] = { static_cast< char >( 0xC3 ),
++                         static_cast< char >( 0x28 ),
++                         0 };
++    auto r = Utf8ToUtf16( bad );
++    CHECK( !r.has_value() );
++}
++
++void RejectsLoneSurrogate()
++{
++    const wchar_t bad[] = { 0xD800, 0 };
++    auto r = Utf16ToUtf8( bad );
++    CHECK( !r.has_value() );
++}
++
++void EqualsIgnoreCaseComparesFolded()
++{
++    CHECK( EqualsIgnoreCase( L"hello", L"hello" ) );
++    CHECK( EqualsIgnoreCase( L"HELLO", L"hello" ) );
++    CHECK( EqualsIgnoreCase( L"HeLLo", L"hEllO" ) );
++    CHECK( !EqualsIgnoreCase( L"hello", L"world" ) );
++    CHECK( !EqualsIgnoreCase( L"hello", L"hell" ) );
++    CHECK( !EqualsIgnoreCase( L"hell", L"hello" ) );
++    CHECK( EqualsIgnoreCase( L"", L"" ) );
++    CHECK( !EqualsIgnoreCase( L"", L"x" ) );
++    // Non-ASCII: towlower in the default "C" locale does not fold accented
++    // letters, so only require that equal non-ASCII strings compare equal.
++    CHECK( EqualsIgnoreCase( L"café", L"café" ) );
++}
++
++constexpr TestCase kCases[] = {
++    { "RoundTripsAscii", RoundTripsAscii },
++    { "RoundTripsNonAscii", RoundTripsNonAscii },
++    { "EmptyIsEmpty", EmptyIsEmpty },
++    { "RejectsInvalidUtf8", RejectsInvalidUtf8 },
++    { "RejectsLoneSurrogate", RejectsLoneSurrogate },
++    { "EqualsIgnoreCaseComparesFolded", EqualsIgnoreCaseComparesFolded },
++};
++
++}  // namespace
++
++int RunEncodingTests()
++{
++    return RunGroup( "encoding", kCases );
++}
++
++}  // namespace rcedit::test
+diff --git a/tests/test_error.cpp b/tests/test_error.cpp
+new file mode 100644
+index 0000000..04473ad
+--- /dev/null
++++ b/tests/test_error.cpp
+@@ -0,0 +1,93 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++
++#include <windows.h>
++
++#include "core/error.h"
++#include "core/format.h"
++
++namespace rcedit::test {
++
++namespace {
++
++void ErrcHasCategoryAndMessage()
++{
++    std::error_code ec = errc::codec_disabled;
++    CHECK( ec.category() == rcedit_category() );
++    CHECK( std::string_view( ec.category().name() ) == "rcedit" );
++    CHECK( ec.message() == "codec disabled in this build" );
++    CHECK( ec == errc::codec_disabled );
++    CHECK( ec != errc::unknown_codec );
++}
++
++void EveryErrcHasDistinctMessage()
++{
++    const errc all[] = {
++        errc::invalid_identifier, errc::invalid_language,
++        errc::unknown_codec,      errc::codec_disabled,
++        errc::resource_not_found, errc::ambiguous_language,
++        errc::read_only,          errc::self_update,
++        errc::corrupt_payload,    errc::empty_payload,
++    };
++    for( size_t i = 0; i < std::size( all ); ++i ) {
++        const std::error_code a = all[ i ];
++        CHECK( !a.message().empty() );
++        CHECK( a.message() != "unknown error" );
++        for( size_t j = i + 1; j < std::size( all ); ++j ) {
++            const std::error_code b = all[ j ];
++            CHECK( a.message() != b.message() );
++        }
++    }
++}
++
++void Win32ErrorUsesSystemCategory()
++{
++    const std::error_code ec = Win32Error( ERROR_FILE_NOT_FOUND );
++    CHECK( ec.category() == std::system_category() );
++    CHECK( ec.value() == ERROR_FILE_NOT_FOUND );
++
++    ::SetLastError( ERROR_ACCESS_DENIED );
++    const std::error_code last = LastWin32Error();
++    CHECK( last.value() == ERROR_ACCESS_DENIED );
++}
++
++void HResultErrorKeepsValue()
++{
++    const std::error_code ec = HResultError( E_FAIL );
++    CHECK( ec.category() == std::system_category() );
++    CHECK( ec.value() == E_FAIL );
++}
++
++void FormatErrorShowsCategoryAndMessage()
++{
++    const std::wstring s = FormatError( std::error_code( errc::read_only ) );
++    CHECK( s.find( L"rcedit" ) != std::wstring::npos );
++    CHECK( s.find( L"read-only" ) != std::wstring::npos );
++
++    const std::wstring w = FormatError( Win32Error( ERROR_FILE_NOT_FOUND ) );
++    CHECK( w.find( L"0x2" ) != std::wstring::npos );
++}
++
++constexpr TestCase kCases[] = {
++    { "ErrcHasCategoryAndMessage", ErrcHasCategoryAndMessage },
++    { "EveryErrcHasDistinctMessage", EveryErrcHasDistinctMessage },
++    { "Win32ErrorUsesSystemCategory", Win32ErrorUsesSystemCategory },
++    { "HResultErrorKeepsValue", HResultErrorKeepsValue },
++    { "FormatErrorShowsCategoryAndMessage",
++      FormatErrorShowsCategoryAndMessage },
++};
++
++}  // namespace
++
++int RunErrorTests()
++{
++    return RunGroup( "error", kCases );
++}
++
++}  // namespace rcedit::test
