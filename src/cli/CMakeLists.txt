@@ -9,6 +9,8 @@ add_executable(rcedit
     main.cpp
     args.h
     args.cpp
+    commands.h
+    commands.cpp
 )
 
 target_link_libraries(rcedit PRIVATE rcedit_core)

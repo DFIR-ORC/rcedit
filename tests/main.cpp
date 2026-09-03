@@ -23,6 +23,7 @@ int RunSevenZipTests();
 #endif
 int RunOpsTests();
 int RunArgsTests();
+int RunCommandsTests();
 
 struct Group
 {
@@ -38,6 +39,7 @@ constexpr Group kGroups[] = {
     { "sevenzip", RunSevenZipTests },
 #endif
     { "ops", RunOpsTests },           { "args", RunArgsTests },
+    { "commands", RunCommandsTests },
 };
 
 }  // namespace rcedit::test

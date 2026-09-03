@@ -1,0 +1,13 @@
+diff --git a/CPP/Common/MyString.h b/CPP/Common/MyString.h
+index ba9914e..3d82cee 100644
+--- a/CPP/Common/MyString.h
++++ b/CPP/Common/MyString.h
+@@ -175,7 +175,7 @@ inline wchar_t MyCharUpper(wchar_t c) throw()
+   if (c <= 0x7F) return c;
+   #ifdef _WIN32
+     #ifdef _UNICODE
+-      return (wchar_t)(unsigned)(UINT_PTR)CharUpperW((LPWSTR)(UINT_PTR)(unsigned)c);
++      return (wchar_t)towupper((wint_t)c);
+     #else
+       return (wchar_t)MyCharUpper_WIN(c);
+     #endif

@@ -18,7 +18,9 @@ add_executable(rcedit_tests
     test_engine.cpp
     test_ops.cpp
     test_args.cpp
+    test_commands.cpp
     "${CMAKE_SOURCE_DIR}/src/cli/args.cpp"
+    "${CMAKE_SOURCE_DIR}/src/cli/commands.cpp"
 )
 target_link_libraries(rcedit_tests PRIVATE rcedit_core)
 target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -58,7 +60,7 @@ add_dependencies(rcedit_tests rcedit_fixture)
 target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
 
 # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
-set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args)
+set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args commands)
 if(RCEDIT_ENABLE_7Z)
     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
 endif()
@@ -82,8 +84,39 @@ function(rcedit_add_import_check target)
             "-DDUMPBIN=${RCEDIT_DUMPBIN}"
             "-DEXE=$<TARGET_FILE:${target}>"
             "-DALLOWED=${allowed}"
+            "-DCONFIG=$<CONFIG>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/check_imports.cmake"
     )
 endfunction()
 
 rcedit_add_import_check(rcedit)
+
+# End-to-end smoke test on the real rcedit.exe.
+set(RCEDIT_SMOKE_CODEC "")
+if(RCEDIT_ENABLE_ZSTD)
+    set(RCEDIT_SMOKE_CODEC "zstd")
+elseif(RCEDIT_ENABLE_7Z)
+    set(RCEDIT_SMOKE_CODEC "7z")
+endif()
+
+add_test(
+    NAME cli_smoke
+    COMMAND "${CMAKE_COMMAND}"
+        "-DRCEDIT=$<TARGET_FILE:rcedit>"
+        "-DFIXTURE=$<TARGET_FILE:rcedit_fixture>"
+        "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/smoke/$<CONFIG>"
+        "-DCODEC=${RCEDIT_SMOKE_CODEC}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_smoke.cmake"
+)
+
+if(RCEDIT_ENABLE_ZSTD AND RCEDIT_ENABLE_7Z)
+    add_test(
+        NAME cli_smoke_7z
+        COMMAND "${CMAKE_COMMAND}"
+            "-DRCEDIT=$<TARGET_FILE:rcedit>"
+            "-DFIXTURE=$<TARGET_FILE:rcedit_fixture>"
+            "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/smoke7z/$<CONFIG>"
+            "-DCODEC=7z"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_smoke.cmake"
+    )
+endif()
