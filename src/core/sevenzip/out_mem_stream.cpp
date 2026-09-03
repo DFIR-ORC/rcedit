@@ -8,7 +8,7 @@
 #include "core/sevenzip/out_mem_stream.h"
 
 #include <cstring>
-#include <new>
+#include <exception>
 
 namespace rcedit::sevenzip {
 
@@ -39,7 +39,11 @@ Z7_COM7F_IMF(
             m_buffer.resize( required );
         }
     }
-    catch( const std::bad_alloc& ) {
+    catch( const std::exception& ) {
+        // Also catches std::length_error: a corrupt/malicious archive can
+        // declare an unpacked size past vector::max_size(), which resize()
+        // reports via length_error rather than bad_alloc. Neither may cross
+        // the 7-Zip COM / library boundary.
         return E_OUTOFMEMORY;
     }
 
@@ -73,7 +77,11 @@ Z7_COM7F_IMF( OutMemStream::SetSize( UInt64 newSize ) )
     try {
         m_buffer.resize( static_cast< size_t >( newSize ) );
     }
-    catch( const std::bad_alloc& ) {
+    catch( const std::exception& ) {
+        // Also catches std::length_error: a corrupt/malicious archive can
+        // declare an unpacked size past vector::max_size(), which resize()
+        // reports via length_error rather than bad_alloc. Neither may cross
+        // the 7-Zip COM / library boundary.
         return E_OUTOFMEMORY;
     }
     return S_OK;

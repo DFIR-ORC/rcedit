@@ -17,6 +17,9 @@ int RunErrorTests();
 int RunEncodingTests();
 int RunResourceIdTests();
 int RunCodecTests();
+#ifdef RCEDIT_HAS_7Z
+int RunSevenZipTests();
+#endif
 // Later tasks add: RunEngineTests, RunOpsTests, RunArgsTests.
 
 struct Group
@@ -26,11 +29,12 @@ struct Group
 };
 
 constexpr Group kGroups[] = {
-    { "version", RunVersionTests },
-    { "error", RunErrorTests },
-    { "encoding", RunEncodingTests },
-    { "resource_id", RunResourceIdTests },
+    { "version", RunVersionTests },   { "error", RunErrorTests },
+    { "encoding", RunEncodingTests }, { "resource_id", RunResourceIdTests },
     { "codec", RunCodecTests },
+#ifdef RCEDIT_HAS_7Z
+    { "sevenzip", RunSevenZipTests },
+#endif
 };
 
 }  // namespace rcedit::test
