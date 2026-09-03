@@ -26,6 +26,17 @@ set(RCEDIT_CORE_SOURCES
 
 add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})
 
+if(RCEDIT_ENABLE_ZSTD)
+    find_package(zstd CONFIG REQUIRED)
+    target_sources(rcedit_core PRIVATE codec_zstd.h codec_zstd.cpp)
+    # Static-only build (R6): the vcpkg zstd port for x64-windows-static
+    # exports both zstd::libzstd_static (the real static IMPORTED library)
+    # and zstd::libzstd (an INTERFACE shim that just forwards to it, kept
+    # for source compatibility with shared-library consumers). Link the
+    # static target directly rather than through the shim.
+    target_link_libraries(rcedit_core PRIVATE zstd::libzstd_static)
+endif()
+
 target_include_directories(rcedit_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 target_compile_definitions(rcedit_core
