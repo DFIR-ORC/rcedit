@@ -24,6 +24,8 @@ set(RCEDIT_CORE_SOURCES
     codec.cpp
     engine.h
     engine_win32.cpp
+    ops.h
+    ops.cpp
 )
 
 add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})
