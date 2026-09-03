@@ -29,6 +29,7 @@ manifest editing, JSON output.
 | In-place edit | `set`/`remove` edit in place, `--output` copies then edits the copy |
 | Portability | Windows only for now, `wmain`, wide strings outside byte payloads |
 | Side-loading | `/NODEFAULTLIB` with explicit allowlist, kernel32 only, CTest import check |
+| Linking | Static only: static CRT and static dependencies, no dynamic-runtime configuration |
 | Tests | Hand-rolled test executable, no framework |
 | Dependencies | vcpkg submodule, overlay ports and triplets from dfir-orc-forge, GitHub Actions CI |
 | Architecture | `rcedit_core` static library plus thin `rcedit` executable |
@@ -42,7 +43,7 @@ rcedit/
   vcpkg.json
   external/vcpkg                          submodule, same tag as dfir-orc-forge
   external/vcpkg_overlay_ports/7zip       copied from dfir-orc-forge (static link patches)
-  external/vcpkg_overlay_triplets/        x64-windows-static, x64-windows-static-md
+  external/vcpkg_overlay_triplets/        x64-windows-static only
   src/core/                               rcedit_core static library
     resource_id.h/.cpp                    ResourceId, ResourceKey, aliases, parse/format
     engine.h                              ResourceEngine interface, MakeWin32Engine()
@@ -85,8 +86,13 @@ C++23. Compile options `/W4 /WX /guard:cf /EHsc /sdl`, definitions
 |---|---|---|
 | `RCEDIT_ENABLE_7Z` | ON | compile 7z codec, link `7zip::7zip` and `7zip::extras`, define `RCEDIT_HAS_7Z` |
 | `RCEDIT_ENABLE_ZSTD` | ON | compile zstd codec, link `zstd::libzstd_static`, define `RCEDIT_HAS_ZSTD` |
-| `RCEDIT_STATIC_RUNTIME` | ON | `CMAKE_MSVC_RUNTIME_LIBRARY` MultiThreaded vs MultiThreadedDLL |
 | `RCEDIT_BUILD_TESTS` | ON | add `tests/` and `enable_testing()` |
+
+There is no option for the runtime. `CMAKE_MSVC_RUNTIME_LIBRARY` is
+fixed to `MultiThreaded$<$<CONFIG:Debug>:Debug>` and the only triplet is
+`x64-windows-static`, so the CRT, 7-Zip, and zstd are always linked
+statically. A configure with `BUILD_SHARED_LIBS` or a non-static triplet
+is rejected with a fatal error.
 
 ### vcpkg
 
@@ -101,17 +107,16 @@ file comes from the preset.
 
 Configure presets, all with `binaryDir` `build/<preset>`:
 
-| Preset | Codecs | Triplet | Runtime |
-|---|---|---|---|
-| `default` | 7z, zstd | `x64-windows-static` | static |
-| `no-7z` | zstd | `x64-windows-static` | static |
-| `no-zstd` | 7z | `x64-windows-static` | static |
-| `minimal` | none | `x64-windows-static` | static |
-| `dev` | 7z, zstd | `x64-windows-static-md` | dynamic |
+| Preset | Codecs | Triplet |
+|---|---|---|
+| `default` | 7z, zstd | `x64-windows-static` |
+| `no-7z` | zstd | `x64-windows-static` |
+| `no-zstd` | 7z | `x64-windows-static` |
+| `minimal` | none | `x64-windows-static` |
 
 Build presets: `default-Debug`, `default-RelWithDebInfo`,
 `default-MinSizeRel`, `no-7z-MinSizeRel`, `no-zstd-MinSizeRel`,
-`minimal-MinSizeRel`, `dev-Debug`. Test presets mirror the build presets.
+`minimal-MinSizeRel`. Test presets mirror the build presets.
 
 ### Link policy
 
@@ -125,10 +130,6 @@ static triplet. If `7zip::extras` drags in `oleaut32` for `PropVariant`,
 the fix is to link only the extras objects the codec needs or to provide
 local `PropVariant` helpers, not to widen the allowlist. The import check
 test is the arbiter.
-
-The `dev` preset with the dynamic CRT is exempt from the allowlist, since
-the CRT DLLs are imports by construction. The import test only runs on
-static-runtime presets.
 
 ## Core library
 
@@ -494,8 +495,8 @@ case, then:
 `tests/check_imports.cmake` runs `dumpbin /imports <exe>` (found via
 `CMAKE_LINKER` directory or `vswhere`), extracts every `.dll` line, and
 fails unless the set is a subset of `{KERNEL32.dll}`. Registered as CTest
-`imports` for the `rcedit` target, skipped when `RCEDIT_STATIC_RUNTIME`
-is off.
+`imports` for the `rcedit` target and runs on every preset and
+configuration, Debug included.
 
 ### CI
 
@@ -503,9 +504,9 @@ is off.
 to any branch, tags `v*`, and pull requests. Checkout with submodules.
 Cache `build/<preset>/vcpkg_installed` keyed on `vcpkg.json` plus the
 overlay port directory hash. Matrix over the configure presets `default`,
-`no-7z`, `no-zstd`, `minimal`, `dev`; each configures, builds its
-MinSizeRel preset (`dev` builds Debug), and runs `ctest --output-on-failure`.
-`default` also builds Debug. On tags, the `default-MinSizeRel` job uploads
+`no-7z`, `no-zstd`, `minimal`; each configures, builds its MinSizeRel
+preset, and runs `ctest --output-on-failure`. `default` also builds and
+tests Debug. On tags, the `default-MinSizeRel` job uploads
 `rcedit.exe` and `rcedit.pdb` as workflow artifacts.
 
 ## Future work noted for design only
