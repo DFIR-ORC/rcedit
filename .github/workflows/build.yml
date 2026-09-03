@@ -1,0 +1,70 @@
+#
+# BEWARE: Do not use unofficial github actions as the version tag could be
+# changed to a malicious commit. If necessary prefer to fork the action.
+#
+name: rcedit
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [default, no-7z, no-zstd, minimal]
+        include:
+          - preset: default
+            extra_config: Debug
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.preset }}/vcpkg_installed
+          key: vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'external/vcpkg_overlay_ports/**', 'external/vcpkg_overlay_triplets/**') }}-${{ hashFiles('.gitmodules') }}
+
+      - name: Configure
+        shell: cmd
+        run: |
+          echo C:\Program Files\Ninja>> %GITHUB_PATH%
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --preset ${{ matrix.preset }}
+
+      - name: Build MinSizeRel
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build --preset ${{ matrix.preset }}-MinSizeRel
+
+      - name: Test MinSizeRel
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          ctest --preset ${{ matrix.preset }}-MinSizeRel
+
+      - name: Build and test Debug
+        if: matrix.extra_config == 'Debug'
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake --build --preset ${{ matrix.preset }}-Debug
+          ctest --preset ${{ matrix.preset }}-Debug
+
+      - name: Upload artifact
+        if: matrix.preset == 'default' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: rcedit-${{ github.ref_name }}
+          path: |
+            build/default/MinSizeRel/rcedit.exe
+            build/default/MinSizeRel/rcedit.pdb
+          retention-days: 7
