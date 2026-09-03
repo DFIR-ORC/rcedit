@@ -1,0 +1,236 @@
+# Review package: a9eb1d5..0535bc7
+
+## Commits
+0535bc7 Fix Set error precedence: self-update before codec-disabled
+
+## Files changed
+ src/core/ops.cpp   | 53 ++++++++++++++++++++++++++++++++++++-----------------
+ tests/test_ops.cpp | 35 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 71 insertions(+), 17 deletions(-)
+
+## Diff
+diff --git a/src/core/ops.cpp b/src/core/ops.cpp
+index 9f364d0..3c6d86e 100644
+--- a/src/core/ops.cpp
++++ b/src/core/ops.cpp
+@@ -55,45 +55,57 @@ std::error_code MaybeDecompress( std::vector< uint8_t >& data, bool raw )
+     }
+ 
+     std::vector< uint8_t > unpacked;
+     if( const auto ec = ( *codec )->Decompress( data, unpacked ) ) {
+         return ec;
+     }
+     data = std::move( unpacked );
+     return {};
+ }
+ 
+-// Copies 'pe' to 'output' when requested and returns the path to modify.
+-std::error_code PrepareTarget(
++// Selects the path to modify ('output' if given, else 'pe') and rejects a
++// self-update target. Does not copy: callers that also have a
++// possibly-failing step before the first file mutation (e.g. Set's compress)
++// should run it between this and CopyToOutput so a doomed operation never
++// leaves a stray copy at 'output'.
++std::error_code SelectTarget(
+     const fs::path& pe,
+     const std::optional< fs::path >& output,
+     fs::path& target )
+ {
+     target = output ? *output : pe;
+ 
+     if( IsRunningExecutable( target ) ) {
+         return make_error_code( errc::self_update );
+     }
++    return {};
++}
+ 
+-    if( output ) {
+-        std::error_code ec;
+-        fs::copy_file( pe, *output, fs::copy_options::overwrite_existing, ec );
+-        if( ec ) {
+-            Log::Debug(
+-                L"Failed to copy '{}' to '{}' [{}]",
+-                pe.wstring(),
+-                output->wstring(),
+-                FormatError( ec ) );
+-            return ec;
+-        }
++// Copies 'pe' to 'output' when requested. Never opens 'pe' for writing.
++std::error_code CopyToOutput(
++    const fs::path& pe,
++    const std::optional< fs::path >& output )
++{
++    if( !output ) {
++        return {};
+     }
+-    return {};
++
++    std::error_code ec;
++    fs::copy_file( pe, *output, fs::copy_options::overwrite_existing, ec );
++    if( ec ) {
++        Log::Debug(
++            L"Failed to copy '{}' to '{}' [{}]",
++            pe.wstring(),
++            output->wstring(),
++            FormatError( ec ) );
++    }
++    return ec;
+ }
+ 
+ }  // namespace
+ 
+ bool IsRunningExecutable( const fs::path& path )
+ {
+     wchar_t self[ MAX_PATH ];
+     const DWORD length = ::GetModuleFileNameW( nullptr, self, MAX_PATH );
+     if( length == 0 || length >= MAX_PATH ) {
+         return false;
+@@ -215,35 +227,39 @@ std::error_code Set(
+     const fs::path& pe,
+     const ResourceKey& key,
+     std::span< const uint8_t > data,
+     CodecId codecId,
+     const std::optional< fs::path >& output )
+ {
+     if( data.empty() ) {
+         return make_error_code( errc::empty_payload );
+     }
+ 
++    fs::path target;
++    if( const auto ec = SelectTarget( pe, output, target ) ) {
++        return ec;
++    }
++
+     std::vector< uint8_t > packed;
+     std::span< const uint8_t > payload = data;
+     if( codecId != CodecId::None ) {
+         const auto codec = FindCodec( codecId );
+         if( !codec ) {
+             return codec.error();
+         }
+         if( const auto ec = ( *codec )->Compress( data, packed ) ) {
+             return ec;
+         }
+         payload = packed;
+     }
+ 
+-    fs::path target;
+-    if( const auto ec = PrepareTarget( pe, output, target ) ) {
++    if( const auto ec = CopyToOutput( pe, output ) ) {
+         return ec;
+     }
+ 
+     ResourceKey resolved = key;
+     if( !resolved.lang ) {
+         resolved.lang = 0;
+     }
+ 
+     if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+         return ec;
+@@ -255,21 +271,24 @@ std::error_code Set(
+     return engine.Commit();
+ }
+ 
+ std::error_code Remove(
+     ResourceEngine& engine,
+     const fs::path& pe,
+     const ResourceKey& key,
+     const std::optional< fs::path >& output )
+ {
+     fs::path target;
+-    if( const auto ec = PrepareTarget( pe, output, target ) ) {
++    if( const auto ec = SelectTarget( pe, output, target ) ) {
++        return ec;
++    }
++    if( const auto ec = CopyToOutput( pe, output ) ) {
+         return ec;
+     }
+ 
+     if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+         return ec;
+     }
+ 
+     ResourceKey resolved;
+     std::vector< uint16_t > candidates;
+     if( const auto ec = ResolveLanguage( engine, key, resolved, candidates ) ) {
+diff --git a/tests/test_ops.cpp b/tests/test_ops.cpp
+index dcbdaf0..9659712 100644
+--- a/tests/test_ops.cpp
++++ b/tests/test_ops.cpp
+@@ -180,20 +180,51 @@ void SetRefusesRunningExecutable()
+              self,
+              kConfigNoLang,
+              Bytes( "x" ),
+              CodecId::None,
+              std::nullopt )
+         == errc::self_update );
+     CHECK(
+         Remove( *engine, self, kBaseline, std::nullopt ) == errc::self_update );
+ }
+ 
++// R21: Set must check self_update before compressing (and therefore before
++// codec_disabled), and must not have copied to 'output' by the time it
++// fails. Only meaningful where at least one codec is disabled in this
++// build; both compiled in (the 'default' preset) has no disabled codec to
++// exercise, so this test does not exist there, mirroring how
++// DisabledCodecIsRejectedOnSet/Get are guarded.
++#if !defined( RCEDIT_HAS_ZSTD ) || !defined( RCEDIT_HAS_7Z )
++void SetErrorPrecedenceSelfUpdateBeforeCodecDisabled()
++{
++#    ifndef RCEDIT_HAS_ZSTD
++    constexpr CodecId kDisabled = CodecId::Zstd;
++#    else
++    constexpr CodecId kDisabled = CodecId::SevenZip;
++#    endif
++
++    wchar_t self[ MAX_PATH ];
++    ::GetModuleFileNameW( nullptr, self, MAX_PATH );
++    CHECK( IsRunningExecutable( self ) );
++
++    auto engine = MakeWin32Engine();
++    CHECK(
++        Set( *engine,
++             self,
++             kConfigNoLang,
++             Bytes( "x" ),
++             kDisabled,
++             std::nullopt )
++        == errc::self_update );
++}
++#endif
++
+ void CompressedRoundTrip( CodecId codec )
+ {
+     TempDir dir;
+     const auto pe = CopyFixture( dir, L"a.exe" );
+     auto engine = MakeWin32Engine();
+     const auto payload = Pattern( 50000 );
+ 
+     CHECK_EC_OK(
+         Set( *engine, pe, kConfigNoLang, payload, codec, std::nullopt ) );
+ 
+@@ -400,20 +431,24 @@ void HexdumpOfResource()
+ }
+ 
+ constexpr TestCase kCases[] = {
+     { "ListBaseline", ListBaseline },
+     { "ListFilters", ListFilters },
+     { "SetThenGetUncompressed", SetThenGetUncompressed },
+     { "SetEmptyFails", SetEmptyFails },
+     { "SetWithOutputLeavesSourceUnchanged",
+       SetWithOutputLeavesSourceUnchanged },
+     { "SetRefusesRunningExecutable", SetRefusesRunningExecutable },
++#if !defined( RCEDIT_HAS_ZSTD ) || !defined( RCEDIT_HAS_7Z )
++    { "SetErrorPrecedenceSelfUpdateBeforeCodecDisabled",
++      SetErrorPrecedenceSelfUpdateBeforeCodecDisabled },
++#endif
+ #ifdef RCEDIT_HAS_ZSTD
+     { "ZstdRoundTrip", ZstdRoundTrip },
+ #else
+     { "ZstdDisabledOnSet", ZstdDisabledOnSet },
+     { "ZstdDisabledOnGet", ZstdDisabledOnGet },
+ #endif
+ #ifdef RCEDIT_HAS_7Z
+     { "SevenZipRoundTrip", SevenZipRoundTrip },
+ #else
+     { "SevenZipDisabledOnSet", SevenZipDisabledOnSet },

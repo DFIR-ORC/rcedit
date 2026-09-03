@@ -2,3 +2,6 @@
 !.gitignore
 !2026-09-03-rcedit-v2/
 !2026-09-03-rcedit-v2/**
+# Oversized regenerable whole-branch review diffs: keep on disk, out of git.
+2026-09-03-rcedit-v2/review-f5afff9..6b10d24.diff
+2026-09-03-rcedit-v2/final-review-ourcode-f5afff9..6b10d24.diff

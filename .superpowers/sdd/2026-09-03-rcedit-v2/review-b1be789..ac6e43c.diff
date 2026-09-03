@@ -1,0 +1,981 @@
+# Review package: b1be789..ac6e43c
+
+## Commits
+ac6e43c Add resource engine interface and Win32 implementation
+
+## Files changed
+ src/core/CMakeLists.txt   |   2 +
+ src/core/engine.h         |  65 ++++++++
+ src/core/engine_win32.cpp | 385 ++++++++++++++++++++++++++++++++++++++++++++++
+ tests/CMakeLists.txt      |  12 +-
+ tests/fixture/fixture.c   |  13 ++
+ tests/fixture/fixture.rc  |   9 ++
+ tests/main.cpp            |   5 +-
+ tests/temp.h              |  64 ++++++++
+ tests/test_engine.cpp     | 252 ++++++++++++++++++++++++++++++
+ 9 files changed, 803 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 3b9d964..1119b7c 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -15,20 +15,22 @@ set(RCEDIT_CORE_SOURCES
+     output.h
+     output.cpp
+     encoding.h
+     encoding.cpp
+     format.h
+     guard.h
+     resource_id.h
+     resource_id.cpp
+     codec.h
+     codec.cpp
++    engine.h
++    engine_win32.cpp
+ )
+ 
+ add_library(rcedit_core STATIC ${RCEDIT_CORE_SOURCES})
+ 
+ if(RCEDIT_ENABLE_ZSTD)
+     find_package(zstd CONFIG REQUIRED)
+     target_sources(rcedit_core PRIVATE codec_zstd.h codec_zstd.cpp)
+     # Static-only build (R6): the vcpkg zstd port for x64-windows-static
+     # exports both zstd::libzstd_static (the real static IMPORTED library)
+     # and zstd::libzstd (an INTERFACE shim that just forwards to it, kept
+diff --git a/src/core/engine.h b/src/core/engine.h
+new file mode 100644
+index 0000000..649f557
+--- /dev/null
++++ b/src/core/engine.h
+@@ -0,0 +1,65 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <cstdint>
++#include <filesystem>
++#include <memory>
++#include <span>
++#include <system_error>
++#include <vector>
++
++#include "core/resource_id.h"
++
++namespace rcedit {
++
++enum class OpenMode
++{
++    ReadOnly,
++    ReadWrite
++};
++
++struct ResourceEntry
++{
++    ResourceKey key;  // lang is always set
++    uint32_t size;
++};
++
++// Access to the resources of one PE file. Not thread-safe.
++//
++// Lifecycle: Open, then any number of Enumerate/Read, then Write/Remove
++// (ReadWrite only), then Commit or Discard. Once a Write/Remove was issued,
++// Enumerate/Read return std::errc::operation_not_permitted until Commit or
++// Discard, after which the engine must be reopened.
++class ResourceEngine
++{
++public:
++    virtual ~ResourceEngine() = default;
++
++    [[nodiscard]] virtual std::error_code Open(
++        const std::filesystem::path& path,
++        OpenMode mode ) = 0;
++    [[nodiscard]] virtual std::error_code Enumerate(
++        std::vector< ResourceEntry >& entries ) = 0;
++    [[nodiscard]] virtual std::error_code Read(
++        const ResourceKey& key,
++        std::vector< uint8_t >& data ) = 0;
++
++    // key.lang must be set. Empty data is errc::empty_payload.
++    [[nodiscard]] virtual std::error_code Write(
++        const ResourceKey& key,
++        std::span< const uint8_t > data ) = 0;
++    [[nodiscard]] virtual std::error_code Remove( const ResourceKey& key ) = 0;
++
++    [[nodiscard]] virtual std::error_code Commit() = 0;
++    virtual void Discard() = 0;
++};
++
++[[nodiscard]] std::unique_ptr< ResourceEngine > MakeWin32Engine();
++
++}  // namespace rcedit
+diff --git a/src/core/engine_win32.cpp b/src/core/engine_win32.cpp
+new file mode 100644
+index 0000000..47e0d03
+--- /dev/null
++++ b/src/core/engine_win32.cpp
+@@ -0,0 +1,385 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "core/engine.h"
++
++#include <windows.h>
++
++#include "core/error.h"
++#include "core/format.h"
++#include "core/guard.h"
++#include "core/log.h"
++
++namespace rcedit {
++
++namespace {
++
++bool IsNotFound( unsigned long code ) noexcept
++{
++    return code == ERROR_RESOURCE_TYPE_NOT_FOUND
++        || code == ERROR_RESOURCE_NAME_NOT_FOUND
++        || code == ERROR_RESOURCE_LANG_NOT_FOUND;
++}
++
++bool IsEnumerationEnd( unsigned long code ) noexcept
++{
++    return code == ERROR_RESOURCE_DATA_NOT_FOUND || IsNotFound( code )
++        || code == ERROR_RESOURCE_ENUM_USER_STOP || code == ERROR_SUCCESS;
++}
++
++struct EnumContext
++{
++    HMODULE module = nullptr;
++    std::vector< ResourceEntry >* entries = nullptr;
++    std::error_code ec;
++    ResourceId type;
++    ResourceId name;
++};
++
++BOOL CALLBACK OnLanguage(
++    HMODULE module,
++    LPCWSTR type,
++    LPCWSTR name,
++    WORD lang,
++    LONG_PTR param )
++{
++    auto* ctx = reinterpret_cast< EnumContext* >( param );
++
++    HRSRC found = ::FindResourceExW( module, type, name, lang );
++    if( found == nullptr ) {
++        ctx->ec = LastWin32Error();
++        return FALSE;
++    }
++
++    const DWORD size = ::SizeofResource( module, found );
++    ctx->entries->push_back(
++        ResourceEntry{ ResourceKey{ ctx->type, ctx->name, lang }, size } );
++    return TRUE;
++}
++
++BOOL CALLBACK
++OnName( HMODULE module, LPCWSTR type, LPWSTR name, LONG_PTR param )
++{
++    auto* ctx = reinterpret_cast< EnumContext* >( param );
++    ctx->name = FromLpcwstr( name );
++
++    if( !::EnumResourceLanguagesW( module, type, name, OnLanguage, param ) ) {
++        const DWORD code = ::GetLastError();
++        if( !IsEnumerationEnd( code ) ) {
++            ctx->ec = Win32Error( code );
++            return FALSE;
++        }
++    }
++    return ctx->ec ? FALSE : TRUE;
++}
++
++BOOL CALLBACK OnType( HMODULE module, LPWSTR type, LONG_PTR param )
++{
++    auto* ctx = reinterpret_cast< EnumContext* >( param );
++    ctx->type = FromLpcwstr( type );
++
++    if( !::EnumResourceNamesW( module, type, OnName, param ) ) {
++        const DWORD code = ::GetLastError();
++        if( !IsEnumerationEnd( code ) ) {
++            ctx->ec = Win32Error( code );
++            return FALSE;
++        }
++    }
++    return ctx->ec ? FALSE : TRUE;
++}
++
++struct LangMatchContext
++{
++    WORD wanted = 0;
++    bool found = false;
++};
++
++// Records whether the wanted language is present, stopping the enumeration
++// as soon as it is seen. Used to sidestep FindResourceExW's language
++// fallback so Read is an exact-language lookup.
++BOOL CALLBACK
++OnLanguageMatch( HMODULE, LPCWSTR, LPCWSTR, WORD lang, LONG_PTR param )
++{
++    auto* ctx = reinterpret_cast< LangMatchContext* >( param );
++    if( lang == ctx->wanted ) {
++        ctx->found = true;
++        return FALSE;  // stop; the match is recorded
++    }
++    return TRUE;
++}
++
++class Win32Engine final : public ResourceEngine
++{
++public:
++    Win32Engine() = default;
++    ~Win32Engine() override
++    {
++        if( m_update != nullptr ) {
++            Log::Warn(
++                L"Resource update session on '{}' was not committed, "
++                L"discarding",
++                m_path.wstring() );
++            Discard();
++        }
++    }
++
++    std::error_code Open( const std::filesystem::path& path, OpenMode mode )
++        override
++    {
++        Discard();
++        m_module.reset();
++        m_path = path;
++        m_mode = mode;
++
++        HMODULE module = ::LoadLibraryExW(
++            path.c_str(),
++            nullptr,
++            LOAD_LIBRARY_AS_IMAGE_RESOURCE
++                | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE );
++        if( module == nullptr ) {
++            const auto ec = LastWin32Error();
++            Log::Debug(
++                L"Failed LoadLibraryExW '{}' [{}]",
++                path.wstring(),
++                FormatError( ec ) );
++            return ec;
++        }
++
++        m_module.reset( module );
++        return {};
++    }
++
++    std::error_code Enumerate( std::vector< ResourceEntry >& entries ) override
++    {
++        if( !m_module ) {
++            return std::make_error_code( std::errc::operation_not_permitted );
++        }
++
++        std::vector< ResourceEntry > found;
++        EnumContext ctx;
++        ctx.module = m_module.get();
++        ctx.entries = &found;
++
++        if( !::EnumResourceTypesW(
++                m_module.get(),
++                OnType,
++                reinterpret_cast< LONG_PTR >( &ctx ) ) ) {
++            const DWORD code = ::GetLastError();
++            if( ctx.ec ) {
++                return ctx.ec;
++            }
++            if( !IsEnumerationEnd( code ) ) {
++                const auto ec = Win32Error( code );
++                Log::Debug(
++                    L"Failed EnumResourceTypesW [{}]", FormatError( ec ) );
++                return ec;
++            }
++        }
++        if( ctx.ec ) {
++            return ctx.ec;
++        }
++
++        entries = std::move( found );
++        return {};
++    }
++
++    std::error_code Read( const ResourceKey& key, std::vector< uint8_t >& data )
++        override
++    {
++        if( !m_module ) {
++            return std::make_error_code( std::errc::operation_not_permitted );
++        }
++        if( !key.lang ) {
++            return make_error_code( errc::invalid_language );
++        }
++        if( const auto ec = RequireExactLanguage( key ) ) {
++            return ec;
++        }
++
++        HRSRC found = ::FindResourceExW(
++            m_module.get(),
++            ToLpcwstr( key.type ),
++            ToLpcwstr( key.name ),
++            *key.lang );
++        if( found == nullptr ) {
++            const DWORD code = ::GetLastError();
++            return IsNotFound( code )
++                ? make_error_code( errc::resource_not_found )
++                : Win32Error( code );
++        }
++
++        HGLOBAL loaded = ::LoadResource( m_module.get(), found );
++        if( loaded == nullptr ) {
++            return LastWin32Error();
++        }
++        const DWORD size = ::SizeofResource( m_module.get(), found );
++        const void* bytes = ::LockResource( loaded );
++        if( bytes == nullptr && size != 0 ) {
++            return LastWin32Error();
++        }
++
++        const auto* begin = static_cast< const uint8_t* >( bytes );
++        data.assign( begin, begin + size );
++        return {};
++    }
++
++    std::error_code Write(
++        const ResourceKey& key,
++        std::span< const uint8_t > data ) override
++    {
++        if( data.empty() ) {
++            return make_error_code( errc::empty_payload );
++        }
++        if( const auto ec = BeginUpdate( key ) ) {
++            return ec;
++        }
++
++        // UpdateResourceW takes a non-const pointer but does not modify the
++        // data.
++        auto* bytes = const_cast< uint8_t* >( data.data() );
++        if( !::UpdateResourceW(
++                m_update,
++                ToLpcwstr( key.type ),
++                ToLpcwstr( key.name ),
++                *key.lang,
++                bytes,
++                static_cast< DWORD >( data.size() ) ) ) {
++            const auto ec = LastWin32Error();
++            Log::Debug( L"Failed UpdateResourceW [{}]", FormatError( ec ) );
++            return ec;
++        }
++        return {};
++    }
++
++    std::error_code Remove( const ResourceKey& key ) override
++    {
++        if( const auto ec = BeginUpdate( key ) ) {
++            return ec;
++        }
++
++        if( !::UpdateResourceW(
++                m_update,
++                ToLpcwstr( key.type ),
++                ToLpcwstr( key.name ),
++                *key.lang,
++                nullptr,
++                0 ) ) {
++            const auto ec = LastWin32Error();
++            Log::Debug(
++                L"Failed UpdateResourceW (delete) [{}]", FormatError( ec ) );
++            return ec;
++        }
++        return {};
++    }
++
++    std::error_code Commit() override
++    {
++        if( m_update == nullptr ) {
++            return {};
++        }
++
++        HANDLE handle = m_update;
++        m_update = nullptr;
++        if( !::EndUpdateResourceW( handle, FALSE ) ) {
++            const auto ec = LastWin32Error();
++            Log::Debug( L"Failed EndUpdateResourceW [{}]", FormatError( ec ) );
++            return ec;
++        }
++        return {};
++    }
++
++    void Discard() override
++    {
++        if( m_update == nullptr ) {
++            return;
++        }
++        HANDLE handle = m_update;
++        m_update = nullptr;
++        if( !::EndUpdateResourceW( handle, TRUE ) ) {
++            Log::Debug(
++                L"Failed EndUpdateResourceW (discard) [{}]",
++                FormatError( LastWin32Error() ) );
++        }
++    }
++
++private:
++    // FindResourceExW falls back to another language when the exact one is
++    // absent (a single-language resource is returned for any requested
++    // language), so an exact-language read cannot rely on it to report a
++    // missing language. Confirm the requested language is actually present
++    // for this (type, name). Returns {} on an exact match, or
++    // errc::resource_not_found when the type, the name, or that specific
++    // language is absent.
++    std::error_code RequireExactLanguage( const ResourceKey& key )
++    {
++        LangMatchContext ctx;
++        ctx.wanted = *key.lang;
++
++        if( !::EnumResourceLanguagesW(
++                m_module.get(),
++                ToLpcwstr( key.type ),
++                ToLpcwstr( key.name ),
++                OnLanguageMatch,
++                reinterpret_cast< LONG_PTR >( &ctx ) ) ) {
++            // The early stop on a match surfaces as a failure with
++            // GetLastError() set to ERROR_RESOURCE_ENUM_USER_STOP; the flag is
++            // authoritative.
++            if( ctx.found ) {
++                return {};
++            }
++            const DWORD code = ::GetLastError();
++            if( IsNotFound( code ) ) {
++                return make_error_code( errc::resource_not_found );
++            }
++            return Win32Error( code );
++        }
++        return ctx.found ? std::error_code{}
++                         : make_error_code( errc::resource_not_found );
++    }
++
++    // Validates a write and opens the update session on first use.
++    std::error_code BeginUpdate( const ResourceKey& key )
++    {
++        if( m_mode != OpenMode::ReadWrite ) {
++            return make_error_code( errc::read_only );
++        }
++        if( !key.lang ) {
++            return make_error_code( errc::invalid_language );
++        }
++        if( m_update != nullptr ) {
++            return {};
++        }
++
++        // The exclusive datafile mapping blocks BeginUpdateResource.
++        m_module.reset();
++
++        m_update = ::BeginUpdateResourceW( m_path.c_str(), FALSE );
++        if( m_update == nullptr ) {
++            const auto ec = LastWin32Error();
++            Log::Debug(
++                L"Failed BeginUpdateResourceW '{}' [{}]",
++                m_path.wstring(),
++                FormatError( ec ) );
++            return ec;
++        }
++        return {};
++    }
++
++    std::filesystem::path m_path;
++    OpenMode m_mode = OpenMode::ReadOnly;
++    ModuleHandle m_module;
++    HANDLE m_update = nullptr;
++};
++
++}  // namespace
++
++std::unique_ptr< ResourceEngine > MakeWin32Engine()
++{
++    return std::make_unique< Win32Engine >();
++}
++
++}  // namespace rcedit
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 0687b58..b2c2cc9 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -1,26 +1,28 @@
+ #
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ #
+ # Copyright 2026 ANSSI. All Rights Reserved.
+ #
+ # Author(s): fabienfl (ANSSI)
+ #
+ add_executable(rcedit_tests
+     check.h
+     context.h
++    temp.h
+     main.cpp
+     test_version.cpp
+     test_error.cpp
+     test_encoding.cpp
+     test_resource_id.cpp
+     test_codec.cpp
++    test_engine.cpp
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
+ if(RCEDIT_ENABLE_7Z)
+     # test_sevenzip.cpp unit-tests OutMemStream directly (guarded by
+     # RCEDIT_HAS_7Z), so it includes core/sevenzip/out_mem_stream.h and,
+     # transitively, <7zip/7zip.h>. rcedit_core links 7zip PRIVATE, so its
+     # include dirs do not propagate here; expose the overlay port's top-level
+     # header root to this target the same way src/core does. The OutMemStream
+@@ -39,27 +41,33 @@ if(RCEDIT_ENABLE_ZSTD)
+     # test_codec.cpp drives the raw zstd streaming API (guarded by
+     # RCEDIT_HAS_ZSTD) to build a frame without an embedded content size, to
+     # cover ZstdCodecImpl::Decompress's streaming branch. rcedit_core links
+     # zstd::libzstd_static PRIVATE, so its usage requirements (include dirs)
+     # do not propagate here; link it directly for the test target too. This
+     # does not affect the "imports" check, which inspects rcedit.exe only.
+     find_package(zstd CONFIG REQUIRED)
+     target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
+ endif()
+ 
++add_executable(rcedit_fixture fixture/fixture.c fixture/fixture.rc)
++add_dependencies(rcedit_tests rcedit_fixture)
++# MSVC's linker embeds a default manifest (RT_MANIFEST #1, lang 1033) unless
++# suppressed; the fixture's baseline must contain only its RCDATA resource.
++target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
++
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+-set(RCEDIT_TEST_GROUPS version error encoding resource_id codec)
++set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine)
+ if(RCEDIT_ENABLE_7Z)
+     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
+ endif()
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+-    add_test(NAME ${group} COMMAND rcedit_tests ${group})
++    add_test(NAME ${group} COMMAND rcedit_tests ${group} $<TARGET_FILE:rcedit_fixture>)
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+ 
+ function(rcedit_add_import_check target)
+     set(allowed "KERNEL32.dll")
+     if(RCEDIT_ENABLE_7Z)
+         list(APPEND allowed "OLEAUT32.dll")
+diff --git a/tests/fixture/fixture.c b/tests/fixture/fixture.c
+new file mode 100644
+index 0000000..00df537
+--- /dev/null
++++ b/tests/fixture/fixture.c
+@@ -0,0 +1,13 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++// Minimal PE used by the engine and CLI tests. Its only resource comes from fixture.rc.
++
++int main(void)
++{
++    return 0;
++}
+diff --git a/tests/fixture/fixture.rc b/tests/fixture/fixture.rc
+new file mode 100644
+index 0000000..4d0b6f0
+--- /dev/null
++++ b/tests/fixture/fixture.rc
+@@ -0,0 +1,9 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++LANGUAGE 0, 0
++FIXTURE RCDATA { "fixture" }
+diff --git a/tests/main.cpp b/tests/main.cpp
+index 916d906..85f8b44 100644
+--- a/tests/main.cpp
++++ b/tests/main.cpp
+@@ -10,35 +10,36 @@
+ 
+ #include "context.h"
+ 
+ namespace rcedit::test {
+ 
+ int RunVersionTests();
+ int RunErrorTests();
+ int RunEncodingTests();
+ int RunResourceIdTests();
+ int RunCodecTests();
++int RunEngineTests();
+ #ifdef RCEDIT_HAS_7Z
+ int RunSevenZipTests();
+ #endif
+-// Later tasks add: RunEngineTests, RunOpsTests, RunArgsTests.
++// Later tasks add: RunOpsTests, RunArgsTests.
+ 
+ struct Group
+ {
+     std::string_view name;
+     int ( *run )();
+ };
+ 
+ constexpr Group kGroups[] = {
+     { "version", RunVersionTests },   { "error", RunErrorTests },
+     { "encoding", RunEncodingTests }, { "resource_id", RunResourceIdTests },
+-    { "codec", RunCodecTests },
++    { "codec", RunCodecTests },       { "engine", RunEngineTests },
+ #ifdef RCEDIT_HAS_7Z
+     { "sevenzip", RunSevenZipTests },
+ #endif
+ };
+ 
+ }  // namespace rcedit::test
+ 
+ int wmain( int argc, wchar_t* argv[] )
+ {
+     using namespace rcedit::test;
+diff --git a/tests/temp.h b/tests/temp.h
+new file mode 100644
+index 0000000..88271db
+--- /dev/null
++++ b/tests/temp.h
+@@ -0,0 +1,64 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <filesystem>
++#include <format>
++#include <random>
++#include <string_view>
++
++#include "context.h"
++
++namespace rcedit::test {
++
++class TempDir
++{
++public:
++    TempDir()
++    {
++        std::random_device rd;
++        std::error_code ec;
++        const auto base =
++            std::filesystem::temp_directory_path( ec ) / L"rcedit_tests";
++        do {
++            m_path = base / std::format( L"{:08x}", rd() );
++        } while( std::filesystem::exists( m_path ) );
++        std::filesystem::create_directories( m_path );
++    }
++
++    ~TempDir()
++    {
++        std::error_code ec;
++        std::filesystem::remove_all( m_path, ec );
++    }
++
++    TempDir( const TempDir& ) = delete;
++    TempDir& operator=( const TempDir& ) = delete;
++
++    [[nodiscard]] const std::filesystem::path& Path() const noexcept
++    {
++        return m_path;
++    }
++
++private:
++    std::filesystem::path m_path;
++};
++
++inline std::filesystem::path CopyFixture(
++    const TempDir& dir,
++    std::wstring_view fileName )
++{
++    const auto target = dir.Path() / fileName;
++    std::filesystem::copy_file(
++        g_fixturePath,
++        target,
++        std::filesystem::copy_options::overwrite_existing );
++    return target;
++}
++
++}  // namespace rcedit::test
+diff --git a/tests/test_engine.cpp b/tests/test_engine.cpp
+new file mode 100644
+index 0000000..d284274
+--- /dev/null
++++ b/tests/test_engine.cpp
+@@ -0,0 +1,252 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++#include "temp.h"
++
++#include "core/engine.h"
++#include "core/error.h"
++
++namespace rcedit::test {
++
++namespace {
++
++const ResourceKey kBaseline{ ResourceId( uint16_t( 10 ) ),
++                             ResourceId( std::wstring( L"FIXTURE" ) ),
++                             0 };
++const ResourceKey kConfig{ ResourceId( uint16_t( 10 ) ),
++                           ResourceId( std::wstring( L"CONFIG" ) ),
++                           1033 };
++const std::vector< uint8_t > kFixtureBytes = {
++    'f', 'i', 'x', 't', 'u', 'r', 'e'
++};
++const std::vector< uint8_t > kConfigBytes = { '<', 'c', 'o', 'n', 'f',
++                                              'i', 'g', '/', '>' };
++
++std::vector< ResourceEntry > EnumerateOf( const std::filesystem::path& pe )
++{
++    auto engine = MakeWin32Engine();
++    std::vector< ResourceEntry > entries;
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadOnly ) );
++    CHECK_EC_OK( engine->Enumerate( entries ) );
++    return entries;
++}
++
++bool Contains(
++    const std::vector< ResourceEntry >& entries,
++    const ResourceKey& key,
++    uint32_t size )
++{
++    for( const auto& e : entries ) {
++        if( e.key == key && e.size == size ) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void OpenMissingFileFails()
++{
++    auto engine = MakeWin32Engine();
++    const auto ec =
++        engine->Open( L"C:\\does\\not\\exist.exe", OpenMode::ReadOnly );
++    CHECK( static_cast< bool >( ec ) );
++    CHECK( ec.category() == std::system_category() );
++}
++
++void EnumerateBaseline()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    const auto entries = EnumerateOf( pe );
++    CHECK( entries.size() == 1 );
++    CHECK( Contains( entries, kBaseline, 7 ) );
++}
++
++void ReadBaseline()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadOnly ) );
++    std::vector< uint8_t > data;
++    CHECK_EC_OK( engine->Read( kBaseline, data ) );
++    CHECK( data == kFixtureBytes );
++}
++
++void ReadMissingIsNotFound()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadOnly ) );
++    std::vector< uint8_t > data;
++    CHECK( engine->Read( kConfig, data ) == errc::resource_not_found );
++
++    const ResourceKey wrongLang{ kBaseline.type, kBaseline.name, 1033 };
++    CHECK( engine->Read( wrongLang, data ) == errc::resource_not_found );
++}
++
++void WriteReadOnlyIsRejected()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadOnly ) );
++    CHECK( engine->Write( kConfig, kConfigBytes ) == errc::read_only );
++    CHECK( engine->Remove( kBaseline ) == errc::read_only );
++}
++
++void WriteWithoutLangIsRejected()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++    const ResourceKey noLang{ kConfig.type, kConfig.name, std::nullopt };
++    CHECK( engine->Write( noLang, kConfigBytes ) == errc::invalid_language );
++    CHECK( engine->Remove( noLang ) == errc::invalid_language );
++}
++
++void WriteEmptyIsRejected()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++    CHECK(
++        engine->Write( kConfig, std::span< const uint8_t >() )
++        == errc::empty_payload );
++}
++
++void WriteCommitReadBack()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    {
++        auto engine = MakeWin32Engine();
++        CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++        CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
++        CHECK_EC_OK( engine->Commit() );
++        CHECK_EC_OK( engine->Commit() );  // second commit is a no-op
++    }
++
++    const auto entries = EnumerateOf( pe );
++    CHECK( entries.size() == 2 );
++    CHECK( Contains( entries, kBaseline, 7 ) );
++    CHECK( Contains(
++        entries, kConfig, static_cast< uint32_t >( kConfigBytes.size() ) ) );
++
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadOnly ) );
++    std::vector< uint8_t > data;
++    CHECK_EC_OK( engine->Read( kConfig, data ) );
++    CHECK( data == kConfigBytes );
++}
++
++void OverwriteReplacesContent()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    const std::vector< uint8_t > replacement = { 'n', 'e', 'w' };
++    {
++        auto engine = MakeWin32Engine();
++        CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++        CHECK_EC_OK( engine->Write( kBaseline, replacement ) );
++        CHECK_EC_OK( engine->Commit() );
++    }
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadOnly ) );
++    std::vector< uint8_t > data;
++    CHECK_EC_OK( engine->Read( kBaseline, data ) );
++    CHECK( data == replacement );
++}
++
++void RemoveCommit()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    {
++        auto engine = MakeWin32Engine();
++        CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++        CHECK_EC_OK( engine->Remove( kBaseline ) );
++        CHECK_EC_OK( engine->Commit() );
++    }
++    const auto entries = EnumerateOf( pe );
++    CHECK( entries.empty() );
++}
++
++void ReadAfterWriteIsNotPermitted()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    auto engine = MakeWin32Engine();
++    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++    std::vector< uint8_t > data;
++    CHECK_EC_OK(
++        engine->Read( kBaseline, data ) );  // reads work before the first write
++    CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
++    std::vector< ResourceEntry > entries;
++    CHECK( engine->Enumerate( entries ) == std::errc::operation_not_permitted );
++    CHECK(
++        engine->Read( kBaseline, data ) == std::errc::operation_not_permitted );
++    engine->Discard();
++}
++
++void DiscardLeavesFileUnchanged()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    {
++        auto engine = MakeWin32Engine();
++        CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++        CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
++        engine->Discard();
++    }
++    const auto entries = EnumerateOf( pe );
++    CHECK( entries.size() == 1 );
++    CHECK( Contains( entries, kBaseline, 7 ) );
++}
++
++void DestructorWithoutCommitDiscards()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    {
++        auto engine = MakeWin32Engine();
++        CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
++        CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
++        // no Commit: destructor must discard (and warn)
++    }
++    const auto entries = EnumerateOf( pe );
++    CHECK( entries.size() == 1 );
++}
++
++constexpr TestCase kCases[] = {
++    { "OpenMissingFileFails", OpenMissingFileFails },
++    { "EnumerateBaseline", EnumerateBaseline },
++    { "ReadBaseline", ReadBaseline },
++    { "ReadMissingIsNotFound", ReadMissingIsNotFound },
++    { "WriteReadOnlyIsRejected", WriteReadOnlyIsRejected },
++    { "WriteWithoutLangIsRejected", WriteWithoutLangIsRejected },
++    { "WriteEmptyIsRejected", WriteEmptyIsRejected },
++    { "WriteCommitReadBack", WriteCommitReadBack },
++    { "OverwriteReplacesContent", OverwriteReplacesContent },
++    { "RemoveCommit", RemoveCommit },
++    { "ReadAfterWriteIsNotPermitted", ReadAfterWriteIsNotPermitted },
++    { "DiscardLeavesFileUnchanged", DiscardLeavesFileUnchanged },
++    { "DestructorWithoutCommitDiscards", DestructorWithoutCommitDiscards },
++};
++
++}  // namespace
++
++int RunEngineTests()
++{
++    return RunGroup( "engine", kCases );
++}
++
++}  // namespace rcedit::test

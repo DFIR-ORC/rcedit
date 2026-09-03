@@ -1,0 +1,171 @@
+# Review package: b301c34..6b10d24
+
+## Commits
+6b10d24 Add CI workflow and README
+
+## Files changed
+ .github/workflows/build.yml | 70 ++++++++++++++++++++++++++++++++++++++++
+ README.md                   | 78 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 148 insertions(+)
+
+## Diff
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+new file mode 100644
+index 0000000..1a515db
+--- /dev/null
++++ b/.github/workflows/build.yml
+@@ -0,0 +1,70 @@
++#
++# BEWARE: Do not use unofficial github actions as the version tag could be
++# changed to a malicious commit. If necessary prefer to fork the action.
++#
++name: rcedit
++
++on:
++  push:
++    branches: ["**"]
++    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
++  pull_request:
++
++jobs:
++  build:
++    runs-on: windows-2025
++    strategy:
++      fail-fast: false
++      matrix:
++        preset: [default, no-7z, no-zstd, minimal]
++        include:
++          - preset: default
++            extra_config: Debug
++
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          submodules: true
++
++      - name: Cache vcpkg
++        uses: actions/cache@v4
++        with:
++          path: build/${{ matrix.preset }}/vcpkg_installed
++          key: vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'external/vcpkg_overlay_ports/**', 'external/vcpkg_overlay_triplets/**') }}-${{ hashFiles('.gitmodules') }}
++
++      - name: Configure
++        shell: cmd
++        run: |
++          echo C:\Program Files\Ninja>> %GITHUB_PATH%
++          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
++          cmake --preset ${{ matrix.preset }}
++
++      - name: Build MinSizeRel
++        shell: cmd
++        run: |
++          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
++          cmake --build --preset ${{ matrix.preset }}-MinSizeRel
++
++      - name: Test MinSizeRel
++        shell: cmd
++        run: |
++          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
++          ctest --preset ${{ matrix.preset }}-MinSizeRel
++
++      - name: Build and test Debug
++        if: matrix.extra_config == 'Debug'
++        shell: cmd
++        run: |
++          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
++          cmake --build --preset ${{ matrix.preset }}-Debug
++          ctest --preset ${{ matrix.preset }}-Debug
++
++      - name: Upload artifact
++        if: matrix.preset == 'default' && startsWith(github.ref, 'refs/tags/')
++        uses: actions/upload-artifact@v4
++        with:
++          name: rcedit-${{ github.ref_name }}
++          path: |
++            build/default/MinSizeRel/rcedit.exe
++            build/default/MinSizeRel/rcedit.pdb
++          retention-days: 7
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..c8245e4
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,78 @@
++# rcedit
++
++Command-line tool to list, extract, set, remove and dump resources of Windows
++PE files. Payloads can be stored 7z or zstd compressed; `get` and `hexdump`
++decompress them transparently.
++
++Static only: static CRT, 7-Zip and zstd linked statically, and the executable
++imports nothing but `KERNEL32.dll` (plus `OLEAUT32.dll` and `USER32.dll`, both
++KnownDLLs, when the 7z codec is built in). A test enforces that allowlist on
++every build.
++
++## Usage
++
++```
++rcedit [global options] <command> <pe_file> [options]
++
++Commands:
++  list     List resources with size and detected compression
++  get      Extract one resource to a file (decompressed unless --raw)
++  set      Add or replace one resource
++  remove   Delete one resource
++  hexdump  Print one resource as hex and ASCII
++
++Global options:
++  -h, --help        Show this help, or a command's help
++      --version     Show version
++  -v, --verbose     Debug logging on stderr
++  -q, --quiet       Errors only on stderr
++```
++
++Resource identifiers: `--type` accepts `RT_RCDATA`, `RCDATA`, `#10` or any
++string name; `--name` accepts `#101` or a string (a bare number is a string);
++`--lang` is decimal or `0x` hex and defaults to neutral. When `--lang` is
++omitted on `get`, `remove` and `hexdump`, the neutral resource is used, then
++the only existing language, otherwise the command fails and lists the
++candidates.
++
++Examples:
++
++```
++rcedit list app.exe
++rcedit set app.exe -t RT_RCDATA -n CONFIG --value-path config.xml -c zstd
++rcedit get app.exe -t RT_RCDATA -n CONFIG -o config.xml
++rcedit hexdump app.exe -t RT_RCDATA -n CONFIG --limit 64
++rcedit remove app.exe -t RT_RCDATA -n CONFIG -o app-without-config.exe
++```
++
++Exit codes: 0 success, 1 the command failed, 2 usage error.
++
++## Build
++
++Requirements: Visual Studio 2022 (MSVC with C++23), CMake 3.25+, Ninja. Run
++from a x64 developer shell.
++
++```
++git clone --recurse-submodules <url> rcedit
++cd rcedit
++cmake --preset default
++cmake --build --preset default-MinSizeRel
++ctest --preset default-MinSizeRel
++```
++
++Presets: `default` (7z and zstd), `no-7z`, `no-zstd`, `minimal` (no codec).
++The `default` preset has `-Debug`, `-RelWithDebInfo` and `-MinSizeRel` build and
++test presets; `no-7z`, `no-zstd` and `minimal` have `-MinSizeRel` only.
++Options `RCEDIT_ENABLE_7Z`, `RCEDIT_ENABLE_ZSTD` and `RCEDIT_BUILD_TESTS` drive
++the presets. Dependencies come from the vcpkg submodule; 7-Zip uses the
++overlay port in `external/vcpkg_overlay_ports`.
++
++## Design
++
++See `docs/superpowers/specs/2026-09-03-rcedit-v2-design.md`. The Win32
++resource API sits behind a `ResourceEngine` interface so a portable PE
++engine can be added later.
++
++## License
++
++LGPL-2.1-or-later. Copyright ANSSI.

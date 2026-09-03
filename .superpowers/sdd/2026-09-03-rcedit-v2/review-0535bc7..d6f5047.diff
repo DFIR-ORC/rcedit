@@ -1,0 +1,746 @@
+# Review package: 0535bc7..d6f5047
+
+## Commits
+d6f5047 Add hand-rolled argument parser with generated help
+
+## Files changed
+ src/cli/CMakeLists.txt |   2 +
+ src/cli/args.cpp       | 282 +++++++++++++++++++++++++++++++++++++++++++++++++
+ src/cli/args.h         |  84 +++++++++++++++
+ tests/CMakeLists.txt   |   4 +-
+ tests/main.cpp         |   4 +-
+ tests/test_args.cpp    | 228 +++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 601 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/cli/CMakeLists.txt b/src/cli/CMakeLists.txt
+index 9bd3573..41bbe5e 100644
+--- a/src/cli/CMakeLists.txt
++++ b/src/cli/CMakeLists.txt
+@@ -1,19 +1,21 @@
+ #
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ #
+ # Copyright 2026 ANSSI. All Rights Reserved.
+ #
+ # Author(s): fabienfl (ANSSI)
+ #
+ add_executable(rcedit
+     main.cpp
++    args.h
++    args.cpp
+ )
+ 
+ target_link_libraries(rcedit PRIVATE rcedit_core)
+ 
+ # Anti side-loading link policy: no default libraries, explicit allowlist.
+ target_link_options(rcedit PRIVATE /NODEFAULTLIB /DEBUG /OPT:REF /OPT:ICF)
+ 
+ set(RCEDIT_CRT_LIBS
+     $<IF:$<CONFIG:Debug>,libcmtd.lib,libcmt.lib>
+     $<IF:$<CONFIG:Debug>,libucrtd.lib,libucrt.lib>
+diff --git a/src/cli/args.cpp b/src/cli/args.cpp
+new file mode 100644
+index 0000000..bb7feee
+--- /dev/null
++++ b/src/cli/args.cpp
+@@ -0,0 +1,282 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "cli/args.h"
++
++#include <algorithm>
++#include <format>
++
++#include "core/encoding.h"
++#include "core/version.h"
++
++namespace rcedit::cli {
++
++namespace {
++
++struct GlobalFlag
++{
++    std::wstring_view longName;
++    wchar_t shortName;
++    std::wstring_view help;
++    bool ParsedArgs::* field;
++};
++
++constexpr GlobalFlag kGlobals[] = {
++    { L"help",
++      L'h',
++      L"Show this help, or a command's help",
++      &ParsedArgs::help },
++    { L"version", 0, L"Show version", &ParsedArgs::version },
++    { L"verbose", L'v', L"Debug logging on stderr", &ParsedArgs::verbose },
++    { L"quiet", L'q', L"Errors only on stderr", &ParsedArgs::quiet },
++};
++
++bool MatchesFlag(
++    std::wstring_view token,
++    std::wstring_view longName,
++    wchar_t shortName )
++{
++    if( token.size() > 2 && token.starts_with( L"--" ) ) {
++        return token.substr( 2 ) == longName;
++    }
++    return shortName != 0 && token.size() == 2 && token[ 0 ] == L'-'
++        && token[ 1 ] == shortName;
++}
++
++const OptionSpec* FindOption(
++    const CommandSpec& command,
++    std::wstring_view token )
++{
++    for( const auto& option : command.options ) {
++        if( MatchesFlag( token, option.longName, option.shortName ) ) {
++            return &option;
++        }
++    }
++    return nullptr;
++}
++
++const CommandSpec* FindCommand(
++    std::span< const CommandSpec > commands,
++    std::wstring_view name )
++{
++    for( const auto& command : commands ) {
++        if( command.name == name ) {
++            return &command;
++        }
++    }
++    return nullptr;
++}
++
++std::unexpected< UsageError > Fail(
++    std::wstring message,
++    const CommandSpec* command )
++{
++    return std::unexpected( UsageError{ std::move( message ), command } );
++}
++
++std::wstring FlagLabel( wchar_t shortName, std::wstring_view longName )
++{
++    return shortName != 0 ? std::format( L"-{}, --{}", shortName, longName )
++                          : std::format( L"    --{}", longName );
++}
++
++std::wstring OptionLabel( const OptionSpec& option )
++{
++    std::wstring label = FlagLabel( option.shortName, option.longName );
++    if( option.takesValue ) {
++        label += std::format( L" <{}>", option.valueName );
++    }
++    return label;
++}
++
++}  // namespace
++
++std::expected< ParsedArgs, UsageError > Parse(
++    std::span< const std::wstring > argv,
++    std::span< const CommandSpec > commands )
++{
++    ParsedArgs args;
++    bool endOfOptions = false;
++    bool havePath = false;
++
++    for( size_t i = 0; i < argv.size(); ++i ) {
++        const std::wstring_view token = argv[ i ];
++
++        if( !endOfOptions && token == L"--" ) {
++            endOfOptions = true;
++            continue;
++        }
++
++        const bool looksLikeOption =
++            !endOfOptions && token.size() > 1 && token.front() == L'-';
++        if( looksLikeOption ) {
++            bool matchedGlobal = false;
++            for( const auto& global : kGlobals ) {
++                if( MatchesFlag( token, global.longName, global.shortName ) ) {
++                    args.*( global.field ) = true;
++                    matchedGlobal = true;
++                    break;
++                }
++            }
++            if( matchedGlobal ) {
++                continue;
++            }
++
++            if( args.command == nullptr ) {
++                return Fail(
++                    std::format( L"unknown option '{}'", token ), nullptr );
++            }
++
++            const OptionSpec* option = FindOption( *args.command, token );
++            if( option == nullptr ) {
++                return Fail(
++                    std::format(
++                        L"unknown option '{}' for command '{}'",
++                        token,
++                        args.command->name ),
++                    args.command );
++            }
++            if( args.Has( option->longName ) ) {
++                return Fail(
++                    std::format(
++                        L"option '--{}' given more than once",
++                        option->longName ),
++                    args.command );
++            }
++
++            std::wstring value;
++            if( option->takesValue ) {
++                if( i + 1 >= argv.size() ) {
++                    return Fail(
++                        std::format(
++                            L"option '--{}' requires a value",
++                            option->longName ),
++                        args.command );
++                }
++                value = argv[ ++i ];
++            }
++            args.values.emplace(
++                std::wstring( option->longName ), std::move( value ) );
++            continue;
++        }
++
++        // Positional.
++        if( args.command == nullptr ) {
++            args.command = FindCommand( commands, token );
++            if( args.command == nullptr ) {
++                return Fail(
++                    std::format( L"unknown command '{}'", token ), nullptr );
++            }
++            continue;
++        }
++        if( !havePath ) {
++            args.pePath = std::wstring( token );
++            havePath = true;
++            continue;
++        }
++        return Fail(
++            std::format( L"unexpected argument '{}'", token ), args.command );
++    }
++
++    if( args.help || args.version ) {
++        return args;
++    }
++
++    if( args.command == nullptr ) {
++        return Fail( L"missing command", nullptr );
++    }
++    if( !havePath ) {
++        return Fail( L"missing <pe_file>", args.command );
++    }
++    if( args.verbose && args.quiet ) {
++        return Fail(
++            L"--verbose and --quiet are mutually exclusive", args.command );
++    }
++
++    for( const auto& option : args.command->options ) {
++        if( option.required && !args.Has( option.longName ) ) {
++            return Fail(
++                std::format(
++                    L"missing required option '--{}'", option.longName ),
++                args.command );
++        }
++    }
++
++    if( args.command->validate != nullptr ) {
++        if( auto message = args.command->validate( args ) ) {
++            return Fail( std::move( *message ), args.command );
++        }
++    }
++
++    return args;
++}
++
++std::wstring FormatUsage( std::span< const CommandSpec > commands )
++{
++    std::wstring out = std::format(
++        L"rcedit {} - Edit resources of Windows PE files\n\n",
++        AnsiToUtf16( Version() ) );
++    out += L"Usage: rcedit [global options] <command> <pe_file> [options]\n\n";
++
++    out += L"Commands:\n";
++    size_t width = 0;
++    for( const auto& command : commands ) {
++        width = std::max( width, command.name.size() );
++    }
++    for( const auto& command : commands ) {
++        out += std::format(
++            L"  {:<{}}  {}\n", command.name, width, command.summary );
++    }
++
++    out += L"\nGlobal options:\n";
++    size_t globalWidth = 0;
++    for( const auto& global : kGlobals ) {
++        globalWidth = std::max(
++            globalWidth,
++            FlagLabel( global.shortName, global.longName ).size() );
++    }
++    for( const auto& global : kGlobals ) {
++        out += std::format(
++            L"  {:<{}}  {}\n",
++            FlagLabel( global.shortName, global.longName ),
++            globalWidth,
++            global.help );
++    }
++
++    out += L"\nRun 'rcedit <command> --help' for the options of a command.\n";
++    return out;
++}
++
++std::wstring FormatCommandUsage( const CommandSpec& command )
++{
++    std::wstring out = std::format(
++        L"Usage: rcedit {} <pe_file> [options]\n\n{}\n",
++        command.name,
++        command.summary );
++
++    if( command.options.empty() ) {
++        return out;
++    }
++
++    size_t width = 0;
++    for( const auto& option : command.options ) {
++        width = std::max( width, OptionLabel( option ).size() );
++    }
++
++    out += L"\nOptions:\n";
++    for( const auto& option : command.options ) {
++        out += std::format(
++            L"  {:<{}}  {}{}\n",
++            OptionLabel( option ),
++            width,
++            option.help,
++            option.required ? L" (required)" : L"" );
++    }
++    return out;
++}
++
++}  // namespace rcedit::cli
+diff --git a/src/cli/args.h b/src/cli/args.h
+new file mode 100644
+index 0000000..7e2d4a2
+--- /dev/null
++++ b/src/cli/args.h
+@@ -0,0 +1,84 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <expected>
++#include <filesystem>
++#include <map>
++#include <optional>
++#include <span>
++#include <string>
++#include <string_view>
++
++namespace rcedit::cli {
++
++struct OptionSpec
++{
++    std::wstring_view longName;  // without dashes
++    wchar_t shortName;  // 0 if none
++    bool takesValue;
++    bool required;
++    std::wstring_view valueName;  // shown in help when takesValue
++    std::wstring_view help;
++};
++
++struct ParsedArgs;
++
++struct CommandSpec
++{
++    std::wstring_view name;
++    std::wstring_view summary;
++    std::span< const OptionSpec > options;
++    std::optional< std::wstring > ( *validate )(
++        const ParsedArgs& args );  // message on failure, may be null
++    int ( *run )( const ParsedArgs& args );  // exit code
++};
++
++struct ParsedArgs
++{
++    const CommandSpec* command = nullptr;
++    std::filesystem::path pePath;
++    std::map< std::wstring, std::wstring, std::less<> >
++        values;  // longName -> value ("" for flags)
++    bool help = false;
++    bool version = false;
++    bool verbose = false;
++    bool quiet = false;
++
++    [[nodiscard]] bool Has( std::wstring_view longName ) const
++    {
++        return values.contains( longName );
++    }
++
++    [[nodiscard]] std::optional< std::wstring_view > Value(
++        std::wstring_view longName ) const
++    {
++        const auto it = values.find( longName );
++        if( it == values.end() ) {
++            return std::nullopt;
++        }
++        return std::wstring_view( it->second );
++    }
++};
++
++struct UsageError
++{
++    std::wstring message;
++    const CommandSpec* command;  // known command, or null
++};
++
++// 'argv' excludes the program name. Pure: no I/O, no Win32.
++[[nodiscard]] std::expected< ParsedArgs, UsageError > Parse(
++    std::span< const std::wstring > argv,
++    std::span< const CommandSpec > commands );
++
++[[nodiscard]] std::wstring FormatUsage(
++    std::span< const CommandSpec > commands );
++[[nodiscard]] std::wstring FormatCommandUsage( const CommandSpec& command );
++
++}  // namespace rcedit::cli
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 8e0bd8c..48b17c9 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -10,20 +10,22 @@ add_executable(rcedit_tests
+     context.h
+     temp.h
+     main.cpp
+     test_version.cpp
+     test_error.cpp
+     test_encoding.cpp
+     test_resource_id.cpp
+     test_codec.cpp
+     test_engine.cpp
+     test_ops.cpp
++    test_args.cpp
++    "${CMAKE_SOURCE_DIR}/src/cli/args.cpp"
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
+ if(RCEDIT_ENABLE_7Z)
+     # test_sevenzip.cpp unit-tests OutMemStream directly (guarded by
+     # RCEDIT_HAS_7Z), so it includes core/sevenzip/out_mem_stream.h and,
+     # transitively, <7zip/7zip.h>. rcedit_core links 7zip PRIVATE, so its
+     # include dirs do not propagate here; expose the overlay port's top-level
+     # header root to this target the same way src/core does. The OutMemStream
+@@ -49,21 +51,21 @@ if(RCEDIT_ENABLE_ZSTD)
+     target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
+ endif()
+ 
+ add_executable(rcedit_fixture fixture/fixture.c fixture/fixture.rc)
+ add_dependencies(rcedit_tests rcedit_fixture)
+ # MSVC's linker embeds a default manifest (RT_MANIFEST #1, lang 1033) unless
+ # suppressed; the fixture's baseline must contain only its RCDATA resource.
+ target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
+ 
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+-set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops)
++set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args)
+ if(RCEDIT_ENABLE_7Z)
+     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
+ endif()
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group} $<TARGET_FILE:rcedit_fixture>)
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+diff --git a/tests/main.cpp b/tests/main.cpp
+index 988afe3..2d5fd2b 100644
+--- a/tests/main.cpp
++++ b/tests/main.cpp
+@@ -15,36 +15,36 @@ namespace rcedit::test {
+ int RunVersionTests();
+ int RunErrorTests();
+ int RunEncodingTests();
+ int RunResourceIdTests();
+ int RunCodecTests();
+ int RunEngineTests();
+ #ifdef RCEDIT_HAS_7Z
+ int RunSevenZipTests();
+ #endif
+ int RunOpsTests();
+-// Later tasks add: RunArgsTests.
++int RunArgsTests();
+ 
+ struct Group
+ {
+     std::string_view name;
+     int ( *run )();
+ };
+ 
+ constexpr Group kGroups[] = {
+     { "version", RunVersionTests },   { "error", RunErrorTests },
+     { "encoding", RunEncodingTests }, { "resource_id", RunResourceIdTests },
+     { "codec", RunCodecTests },       { "engine", RunEngineTests },
+ #ifdef RCEDIT_HAS_7Z
+     { "sevenzip", RunSevenZipTests },
+ #endif
+-    { "ops", RunOpsTests },
++    { "ops", RunOpsTests },           { "args", RunArgsTests },
+ };
+ 
+ }  // namespace rcedit::test
+ 
+ int wmain( int argc, wchar_t* argv[] )
+ {
+     using namespace rcedit::test;
+ 
+     if( argc < 2 ) {
+         std::print( stderr, "usage: rcedit_tests <group> [fixture_path]\n" );
+diff --git a/tests/test_args.cpp b/tests/test_args.cpp
+new file mode 100644
+index 0000000..6c65b25
+--- /dev/null
++++ b/tests/test_args.cpp
+@@ -0,0 +1,228 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++
++#include "cli/args.h"
++
++namespace rcedit::test {
++
++namespace {
++
++using namespace rcedit::cli;
++
++constexpr OptionSpec kAlphaOptions[] = {
++    { L"type", L't', true, true, L"TYPE", L"Resource type" },
++    { L"name", L'n', true, false, L"NAME", L"Resource name" },
++    { L"raw", 0, false, false, L"", L"Raw output" },
++};
++
++constexpr OptionSpec kBetaOptions[] = {
++    { L"value", 0, true, false, L"TEXT", L"Inline value" },
++    { L"value-path", 0, true, false, L"FILE", L"Value file" },
++};
++
++std::optional< std::wstring > ValidateBeta( const ParsedArgs& args )
++{
++    const int count = ( args.Has( L"value" ) ? 1 : 0 )
++        + ( args.Has( L"value-path" ) ? 1 : 0 );
++    if( count != 1 ) {
++        return L"exactly one of --value or --value-path is required";
++    }
++    return std::nullopt;
++}
++
++int RunNoop( const ParsedArgs& )
++{
++    return 0;
++}
++
++const CommandSpec kCommands[] = {
++    { L"alpha", L"Alpha command", kAlphaOptions, nullptr, RunNoop },
++    { L"beta", L"Beta command", kBetaOptions, ValidateBeta, RunNoop },
++};
++
++std::expected< ParsedArgs, UsageError > ParseOf(
++    std::initializer_list< const wchar_t* > tokens )
++{
++    std::vector< std::wstring > argv;
++    for( const wchar_t* t : tokens ) {
++        argv.emplace_back( t );
++    }
++    return Parse( argv, kCommands );
++}
++
++void ParsesCommandPathAndOptions()
++{
++    auto r = ParseOf(
++        { L"alpha",
++          L"a.exe",
++          L"--type",
++          L"RT_RCDATA",
++          L"-n",
++          L"CONFIG",
++          L"--raw" } );
++    CHECK( r.has_value() );
++    CHECK( r->command == &kCommands[ 0 ] );
++    CHECK( r->pePath == L"a.exe" );
++    CHECK( r->Value( L"type" ) == L"RT_RCDATA" );
++    CHECK( r->Value( L"name" ) == L"CONFIG" );
++    CHECK( r->Has( L"raw" ) );
++    CHECK( !r->Has( L"missing" ) );
++    CHECK( !r->Value( L"missing" ).has_value() );
++}
++
++void OptionsMayPrecedeThePath()
++{
++    auto r = ParseOf( { L"alpha", L"-t", L"X", L"a.exe" } );
++    CHECK(
++        r.has_value() && r->pePath == L"a.exe" && r->Value( L"type" ) == L"X" );
++}
++
++void GlobalsAnywhere()
++{
++    auto a = ParseOf( { L"--verbose", L"alpha", L"a.exe", L"-t", L"X" } );
++    CHECK( a.has_value() && a->verbose && !a->quiet );
++    auto b = ParseOf( { L"alpha", L"a.exe", L"-t", L"X", L"-q" } );
++    CHECK( b.has_value() && b->quiet );
++    auto c = ParseOf( { L"alpha", L"a.exe", L"-t", L"X", L"-v", L"-q" } );
++    CHECK( !c.has_value() );
++}
++
++void HelpAndVersionShortCircuit()
++{
++    auto a = ParseOf( { L"--help" } );
++    CHECK( a.has_value() && a->help && a->command == nullptr );
++    auto b = ParseOf( { L"alpha", L"-h" } );
++    CHECK( b.has_value() && b->help && b->command == &kCommands[ 0 ] );
++    auto c = ParseOf( { L"--version" } );
++    CHECK( c.has_value() && c->version );
++    auto d = ParseOf(
++        { L"beta", L"--help" } );  // required checks and validate skipped
++    CHECK( d.has_value() && d->help );
++}
++
++void MissingCommandOrPath()
++{
++    auto a = ParseOf( {} );
++    CHECK( !a.has_value() && a.error().command == nullptr );
++    CHECK( a.error().message.find( L"command" ) != std::wstring::npos );
++
++    auto b = ParseOf( { L"alpha", L"-t", L"X" } );
++    CHECK( !b.has_value() && b.error().command == &kCommands[ 0 ] );
++    CHECK( b.error().message.find( L"pe_file" ) != std::wstring::npos );
++
++    auto c = ParseOf( { L"gamma", L"a.exe" } );
++    CHECK(
++        !c.has_value()
++        && c.error().message.find( L"gamma" ) != std::wstring::npos );
++}
++
++void ExtraPositionalIsAnError()
++{
++    auto r = ParseOf( { L"alpha", L"a.exe", L"b.exe", L"-t", L"X" } );
++    CHECK(
++        !r.has_value()
++        && r.error().message.find( L"b.exe" ) != std::wstring::npos );
++}
++
++void UnknownDuplicateAndMissingValue()
++{
++    auto a = ParseOf( { L"alpha", L"a.exe", L"-t", L"X", L"--bogus" } );
++    CHECK(
++        !a.has_value()
++        && a.error().message.find( L"--bogus" ) != std::wstring::npos );
++
++    auto b = ParseOf( { L"alpha", L"a.exe", L"-t", L"X", L"-t", L"Y" } );
++    CHECK(
++        !b.has_value()
++        && b.error().message.find( L"--type" ) != std::wstring::npos );
++
++    auto c = ParseOf( { L"alpha", L"a.exe", L"-t" } );
++    CHECK(
++        !c.has_value()
++        && c.error().message.find( L"value" ) != std::wstring::npos );
++
++    auto d = ParseOf( { L"alpha", L"a.exe", L"-t", L"X", L"-x" } );
++    CHECK( !d.has_value() );
++
++    auto e = ParseOf( { L"--bogus", L"alpha", L"a.exe" } );
++    CHECK( !e.has_value() && e.error().command == nullptr );
++}
++
++void RequiredOptionEnforced()
++{
++    auto r = ParseOf( { L"alpha", L"a.exe", L"-n", L"CONFIG" } );
++    CHECK(
++        !r.has_value()
++        && r.error().message.find( L"--type" ) != std::wstring::npos );
++}
++
++void ValuesMayStartWithDash()
++{
++    auto r = ParseOf( { L"alpha", L"a.exe", L"-t", L"-weird" } );
++    CHECK( r.has_value() && r->Value( L"type" ) == L"-weird" );
++}
++
++void DoubleDashEndsOptions()
++{
++    auto r = ParseOf( { L"alpha", L"-t", L"X", L"--", L"-file.exe" } );
++    CHECK( r.has_value() && r->pePath == L"-file.exe" );
++}
++
++void ValidateIsCalled()
++{
++    auto a = ParseOf( { L"beta", L"a.exe" } );
++    CHECK(
++        !a.has_value()
++        && a.error().message.find( L"exactly one" ) != std::wstring::npos );
++    auto b = ParseOf(
++        { L"beta", L"a.exe", L"--value", L"x", L"--value-path", L"f" } );
++    CHECK( !b.has_value() );
++    auto c = ParseOf( { L"beta", L"a.exe", L"--value-path", L"f" } );
++    CHECK( c.has_value() );
++}
++
++void UsageMentionsEverything()
++{
++    const std::wstring usage = FormatUsage( kCommands );
++    CHECK( usage.find( L"alpha" ) != std::wstring::npos );
++    CHECK( usage.find( L"Beta command" ) != std::wstring::npos );
++    CHECK( usage.find( L"--verbose" ) != std::wstring::npos );
++    CHECK( usage.find( L"--version" ) != std::wstring::npos );
++
++    const std::wstring alpha = FormatCommandUsage( kCommands[ 0 ] );
++    CHECK( alpha.find( L"-t, --type <TYPE>" ) != std::wstring::npos );
++    CHECK( alpha.find( L"Resource type" ) != std::wstring::npos );
++    CHECK( alpha.find( L"(required)" ) != std::wstring::npos );
++    CHECK( alpha.find( L"--raw" ) != std::wstring::npos );
++    CHECK( alpha.find( L"<pe_file>" ) != std::wstring::npos );
++}
++
++constexpr TestCase kCases[] = {
++    { "ParsesCommandPathAndOptions", ParsesCommandPathAndOptions },
++    { "OptionsMayPrecedeThePath", OptionsMayPrecedeThePath },
++    { "GlobalsAnywhere", GlobalsAnywhere },
++    { "HelpAndVersionShortCircuit", HelpAndVersionShortCircuit },
++    { "MissingCommandOrPath", MissingCommandOrPath },
++    { "ExtraPositionalIsAnError", ExtraPositionalIsAnError },
++    { "UnknownDuplicateAndMissingValue", UnknownDuplicateAndMissingValue },
++    { "RequiredOptionEnforced", RequiredOptionEnforced },
++    { "ValuesMayStartWithDash", ValuesMayStartWithDash },
++    { "DoubleDashEndsOptions", DoubleDashEndsOptions },
++    { "ValidateIsCalled", ValidateIsCalled },
++    { "UsageMentionsEverything", UsageMentionsEverything },
++};
++
++}  // namespace
++
++int RunArgsTests()
++{
++    return RunGroup( "args", kCases );
++}
++
++}  // namespace rcedit::test

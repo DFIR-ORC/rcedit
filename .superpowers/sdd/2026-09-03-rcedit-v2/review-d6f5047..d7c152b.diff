@@ -1,0 +1,1394 @@
+# Review package: d6f5047..d7c152b
+
+## Commits
+d7c152b Add commands, entry point and CLI smoke test
+
+## Files changed
+ .../7zip/mycharupper-no-user32.patch               |  13 +
+ external/vcpkg_overlay_ports/7zip/portfile.cmake   |   1 +
+ external/vcpkg_overlay_ports/7zip/vcpkg.json       |   2 +-
+ src/cli/CMakeLists.txt                             |   2 +
+ src/cli/commands.cpp                               | 566 +++++++++++++++++++++
+ src/cli/commands.h                                 |  19 +
+ src/cli/main.cpp                                   |  71 ++-
+ tests/CMakeLists.txt                               |  35 +-
+ tests/check_imports.cmake                          |   9 +
+ tests/cli_smoke.cmake                              | 114 +++++
+ tests/main.cpp                                     |   2 +
+ tests/test_commands.cpp                            | 297 +++++++++++
+ 12 files changed, 1125 insertions(+), 6 deletions(-)
+
+## Diff
+diff --git a/external/vcpkg_overlay_ports/7zip/mycharupper-no-user32.patch b/external/vcpkg_overlay_ports/7zip/mycharupper-no-user32.patch
+new file mode 100644
+index 0000000..33293b5
+--- /dev/null
++++ b/external/vcpkg_overlay_ports/7zip/mycharupper-no-user32.patch
+@@ -0,0 +1,13 @@
++diff --git a/CPP/Common/MyString.h b/CPP/Common/MyString.h
++index ba9914e..3d82cee 100644
++--- a/CPP/Common/MyString.h
+++++ b/CPP/Common/MyString.h
++@@ -175,7 +175,7 @@ inline wchar_t MyCharUpper(wchar_t c) throw()
++   if (c <= 0x7F) return c;
++   #ifdef _WIN32
++     #ifdef _UNICODE
++-      return (wchar_t)(unsigned)(UINT_PTR)CharUpperW((LPWSTR)(UINT_PTR)(unsigned)c);
+++      return (wchar_t)towupper((wint_t)c);
++     #else
++       return (wchar_t)MyCharUpper_WIN(c);
++     #endif
+diff --git a/external/vcpkg_overlay_ports/7zip/portfile.cmake b/external/vcpkg_overlay_ports/7zip/portfile.cmake
+index 20badb8..c186534 100644
+--- a/external/vcpkg_overlay_ports/7zip/portfile.cmake
++++ b/external/vcpkg_overlay_ports/7zip/portfile.cmake
+@@ -1,19 +1,20 @@
+ vcpkg_from_github(
+     OUT_SOURCE_PATH SOURCE_PATH
+     REPO ip7z/7zip
+     REF "${VERSION}"
+     SHA512 9ce8acdbbb44045c5c9983db1093b6abc78439ee2b0ba57820a44a08d0787cb5ab34e25fd3ff33a93f274cc006684ce6013d4e98b47e7834318898e9d10d2259
+     HEAD_REF main
+     PATCHES
+         add-functions-and-fixes-for-static-link.patch
+         my-com.patch
++        mycharupper-no-user32.patch
+ )
+ 
+ file(COPY "${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt" DESTINATION "${SOURCE_PATH}")
+ file(COPY "${CMAKE_CURRENT_LIST_DIR}/7zip-config.cmake.in" DESTINATION "${SOURCE_PATH}")
+ file(COPY "${CMAKE_CURRENT_LIST_DIR}/Archive2.def" DESTINATION "${SOURCE_PATH}/CPP/7zip/Archive/")
+ 
+ vcpkg_cmake_configure(
+     SOURCE_PATH "${SOURCE_PATH}"
+ )
+ 
+diff --git a/external/vcpkg_overlay_ports/7zip/vcpkg.json b/external/vcpkg_overlay_ports/7zip/vcpkg.json
+index 75f3cdf..5c7330e 100644
+--- a/external/vcpkg_overlay_ports/7zip/vcpkg.json
++++ b/external/vcpkg_overlay_ports/7zip/vcpkg.json
+@@ -1,14 +1,14 @@
+ {
+   "name": "7zip",
+   "version-string": "24.06",
+-  "port-version": 8,
++  "port-version": 9,
+   "description": "Library for archiving file with a high compression ratio.",
+   "homepage": "https://www.7-zip.org",
+   "license": "LGPL-2.1-or-later",
+   "supports": "!uwp & !xbox",
+   "dependencies": [
+     {
+       "name": "vcpkg-cmake",
+       "host": true
+     },
+     {
+diff --git a/src/cli/CMakeLists.txt b/src/cli/CMakeLists.txt
+index 41bbe5e..4dcf048 100644
+--- a/src/cli/CMakeLists.txt
++++ b/src/cli/CMakeLists.txt
+@@ -2,20 +2,22 @@
+ # SPDX-License-Identifier: LGPL-2.1-or-later
+ #
+ # Copyright 2026 ANSSI. All Rights Reserved.
+ #
+ # Author(s): fabienfl (ANSSI)
+ #
+ add_executable(rcedit
+     main.cpp
+     args.h
+     args.cpp
++    commands.h
++    commands.cpp
+ )
+ 
+ target_link_libraries(rcedit PRIVATE rcedit_core)
+ 
+ # Anti side-loading link policy: no default libraries, explicit allowlist.
+ target_link_options(rcedit PRIVATE /NODEFAULTLIB /DEBUG /OPT:REF /OPT:ICF)
+ 
+ set(RCEDIT_CRT_LIBS
+     $<IF:$<CONFIG:Debug>,libcmtd.lib,libcmt.lib>
+     $<IF:$<CONFIG:Debug>,libucrtd.lib,libucrt.lib>
+diff --git a/src/cli/commands.cpp b/src/cli/commands.cpp
+new file mode 100644
+index 0000000..ee7adc0
+--- /dev/null
++++ b/src/cli/commands.cpp
+@@ -0,0 +1,566 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "cli/commands.h"
++
++#include <algorithm>
++#include <format>
++#include <fstream>
++#include <iterator>
++#include <limits>
++
++#include "core/codec.h"
++#include "core/encoding.h"
++#include "core/engine.h"
++#include "core/error.h"
++#include "core/format.h"
++#include "core/log.h"
++#include "core/ops.h"
++#include "core/output.h"
++#include "core/resource_id.h"
++
++namespace rcedit::cli {
++
++namespace {
++
++namespace fs = std::filesystem;
++
++constexpr int kOk = 0;
++constexpr int kFailure = 1;
++constexpr int kUsage = 2;
++
++// ---- shared option specs ----------------------------------------------------
++
++constexpr OptionSpec kTypeRequired = {
++    L"type", L't',    true,
++    true,    L"TYPE", L"Resource type: RT_RCDATA, RCDATA, #10 or a name"
++};
++constexpr OptionSpec kTypeOptional = { L"type", L't',
++                                       true,    false,
++                                       L"TYPE", L"Only this resource type" };
++constexpr OptionSpec kNameRequired = {
++    L"name", L'n', true, true, L"NAME", L"Resource name: #101 or a string"
++};
++constexpr OptionSpec kNameOptional = { L"name", L'n',
++                                       true,    false,
++                                       L"NAME", L"Only this resource name" };
++constexpr OptionSpec kLang = {
++    L"lang", L'l',    true,
++    false,   L"LANG", L"Language id, decimal or 0x hex (default: neutral)"
++};
++constexpr OptionSpec kRaw = {
++    L"raw", 0, false, false, L"", L"Do not decompress a 7z or zstd payload"
++};
++
++std::wstring_view CompressHelp()
++{
++    static const std::wstring help = [] {
++        std::wstring text = L"Compress the payload before storing it: ";
++        const auto names = AvailableCodecNames();
++        for( size_t i = 0; i < names.size(); ++i ) {
++            text += names[ i ];
++            if( i + 1 < names.size() ) {
++                text += L", ";
++            }
++        }
++        return text;
++    }();
++    return help;
++}
++
++constexpr OptionSpec kListOptions[] = { kTypeOptional, kNameOptional };
++
++constexpr OptionSpec kGetOptions[] = {
++    kTypeRequired,
++    kNameRequired,
++    kLang,
++    { L"output", L'o', true, true, L"FILE", L"Destination file, overwritten" },
++    kRaw,
++};
++
++const OptionSpec kSetOptions[] = {
++    kTypeRequired,
++    kNameRequired,
++    kLang,
++    { L"value",
++      0,
++      true,
++      false,
++      L"TEXT",
++      L"Store TEXT as UTF-8 bytes (no terminator)" },
++    { L"value-utf16",
++      0,
++      true,
++      false,
++      L"TEXT",
++      L"Store TEXT as UTF-16LE bytes (no terminator)" },
++    { L"value-path", 0, true, false, L"FILE", L"Store the content of FILE" },
++    { L"compress", L'c', true, false, L"CODEC", CompressHelp() },
++    { L"output",
++      L'o',
++      true,
++      false,
++      L"FILE",
++      L"Write to a copy of <pe_file> at FILE instead of in place" },
++};
++
++constexpr OptionSpec kRemoveOptions[] = {
++    kTypeRequired,
++    kNameRequired,
++    kLang,
++    { L"output",
++      L'o',
++      true,
++      false,
++      L"FILE",
++      L"Write to a copy of <pe_file> at FILE instead of in place" },
++};
++
++constexpr OptionSpec kHexdumpOptions[] = {
++    kTypeRequired,
++    kNameRequired,
++    kLang,
++    kRaw,
++    { L"limit", 0, true, false, L"N", L"Show at most N bytes" },
++};
++
++// ---- value parsing shared by validate and run
++// --------------------------------
++
++std::expected< ResourceKey, std::wstring > ParseKey(
++    const ParsedArgs& args,
++    bool typeRequired )
++{
++    ResourceKey key;
++
++    if( const auto type = args.Value( L"type" ) ) {
++        auto parsed = ParseResourceType( *type );
++        if( !parsed ) {
++            return std::unexpected(
++                std::format( L"invalid --type '{}'", *type ) );
++        }
++        key.type = std::move( *parsed );
++    }
++    else if( typeRequired ) {
++        return std::unexpected( L"missing required option '--type'" );
++    }
++
++    if( const auto name = args.Value( L"name" ) ) {
++        auto parsed = ParseResourceName( *name );
++        if( !parsed ) {
++            return std::unexpected(
++                std::format( L"invalid --name '{}'", *name ) );
++        }
++        key.name = std::move( *parsed );
++    }
++
++    if( const auto lang = args.Value( L"lang" ) ) {
++        auto parsed = ParseLang( *lang );
++        if( !parsed ) {
++            return std::unexpected(
++                std::format( L"invalid --lang '{}'", *lang ) );
++        }
++        key.lang = *parsed;
++    }
++
++    return key;
++}
++
++std::expected< CodecId, std::wstring > ParseCompress( const ParsedArgs& args )
++{
++    const auto name = args.Value( L"compress" );
++    if( !name ) {
++        return CodecId::None;
++    }
++    const auto id = ParseCodecName( *name );
++    if( !id ) {
++        return std::unexpected(
++            std::format( L"unknown --compress codec '{}'", *name ) );
++    }
++    if( *id != CodecId::None && !IsCodecAvailable( *id ) ) {
++        return std::unexpected(
++            std::format(
++                L"--compress codec '{}' is disabled in this build", *name ) );
++    }
++    return *id;
++}
++
++std::expected< std::optional< size_t >, std::wstring > ParseLimit(
++    const ParsedArgs& args )
++{
++    const auto text = args.Value( L"limit" );
++    if( !text ) {
++        return std::nullopt;
++    }
++    if( text->empty() || !std::ranges::all_of( *text, []( wchar_t c ) {
++            return c >= L'0' && c <= L'9';
++        } ) ) {
++        return std::unexpected( std::format( L"invalid --limit '{}'", *text ) );
++    }
++    size_t value = 0;
++    for( wchar_t c : *text ) {
++        const size_t digit = static_cast< size_t >( c - L'0' );
++        if( value > ( std::numeric_limits< size_t >::max() - digit ) / 10 ) {
++            return std::unexpected(
++                std::format( L"--limit '{}' is too large", *text ) );
++        }
++        value = value * 10 + digit;
++    }
++    return value;
++}
++
++std::optional< fs::path > OutputPath( const ParsedArgs& args )
++{
++    const auto value = args.Value( L"output" );
++    if( !value ) {
++        return std::nullopt;
++    }
++    return fs::path( std::wstring( *value ) );
++}
++
++std::expected< std::vector< uint8_t >, std::error_code > ReadFile(
++    const fs::path& path )
++{
++    std::ifstream in( path, std::ios::binary );
++    if( !in ) {
++        return std::unexpected(
++            std::make_error_code( std::errc::no_such_file_or_directory ) );
++    }
++    std::vector< uint8_t > data(
++        ( std::istreambuf_iterator< char >( in ) ),
++        std::istreambuf_iterator< char >() );
++    if( in.bad() ) {
++        return std::unexpected( std::make_error_code( std::errc::io_error ) );
++    }
++    return data;
++}
++
++std::error_code WriteFile(
++    const fs::path& path,
++    std::span< const uint8_t > data )
++{
++    std::ofstream out( path, std::ios::binary | std::ios::trunc );
++    if( !out ) {
++        return std::make_error_code( std::errc::permission_denied );
++    }
++    out.write(
++        reinterpret_cast< const char* >( data.data() ),
++        static_cast< std::streamsize >( data.size() ) );
++    if( !out ) {
++        return std::make_error_code( std::errc::io_error );
++    }
++    return {};
++}
++
++// Explains an operation failure; lists candidate languages when ambiguous.
++int Report(
++    const std::error_code& ec,
++    const fs::path& pe,
++    const ResourceKey& key )
++{
++    if( ec == errc::ambiguous_language ) {
++        auto engine = MakeWin32Engine();
++        ResourceKey resolved;
++        std::vector< uint16_t > candidates;
++        if( !engine->Open( pe, OpenMode::ReadOnly )
++            && ResolveLanguage( *engine, key, resolved, candidates ) == ec ) {
++            std::wstring list;
++            for( size_t i = 0; i < candidates.size(); ++i ) {
++                list +=
++                    std::format( L"{}{}", i ? L", " : L"", candidates[ i ] );
++            }
++            Log::Error(
++                L"Resource {}/{} exists in several languages ({}), specify "
++                L"--lang",
++                FormatResourceType( key.type ),
++                FormatResourceName( key.name ),
++                list );
++            return kFailure;
++        }
++    }
++
++    Log::Error( L"Failed on '{}' [{}]", pe.wstring(), FormatError( ec ) );
++    return kFailure;
++}
++
++// ---- validate
++// -----------------------------------------------------------------
++
++std::optional< std::wstring > ValidateList( const ParsedArgs& args )
++{
++    if( auto key = ParseKey( args, false ); !key ) {
++        return key.error();
++    }
++    return std::nullopt;
++}
++
++std::optional< std::wstring > ValidateKeyOnly( const ParsedArgs& args )
++{
++    if( auto key = ParseKey( args, true ); !key ) {
++        return key.error();
++    }
++    return std::nullopt;
++}
++
++std::optional< std::wstring > ValidateSet( const ParsedArgs& args )
++{
++    if( auto key = ParseKey( args, true ); !key ) {
++        return key.error();
++    }
++    const int sources = ( args.Has( L"value" ) ? 1 : 0 )
++        + ( args.Has( L"value-utf16" ) ? 1 : 0 )
++        + ( args.Has( L"value-path" ) ? 1 : 0 );
++    if( sources != 1 ) {
++        return L"exactly one of --value, --value-utf16 or --value-path is "
++               L"required";
++    }
++    if( auto codec = ParseCompress( args ); !codec ) {
++        return codec.error();
++    }
++    return std::nullopt;
++}
++
++std::optional< std::wstring > ValidateHexdump( const ParsedArgs& args )
++{
++    if( auto key = ParseKey( args, true ); !key ) {
++        return key.error();
++    }
++    if( auto limit = ParseLimit( args ); !limit ) {
++        return limit.error();
++    }
++    return std::nullopt;
++}
++
++// ---- run
++// ------------------------------------------------------------------------
++
++int RunList( const ParsedArgs& args )
++{
++    const auto key = ParseKey( args, false );
++    if( !key ) {
++        return kUsage;
++    }
++    ListOptions options;
++    if( args.Has( L"type" ) ) {
++        options.type = key->type;
++    }
++    if( args.Has( L"name" ) ) {
++        options.name = key->name;
++    }
++
++    auto engine = MakeWin32Engine();
++    std::vector< ListEntry > entries;
++    if( const auto ec = List( *engine, args.pePath, options, entries ) ) {
++        return Report( ec, args.pePath, *key );
++    }
++
++    size_t typeWidth = 4;
++    size_t nameWidth = 4;
++    for( const auto& e : entries ) {
++        typeWidth =
++            std::max( typeWidth, FormatResourceType( e.key.type ).size() );
++        nameWidth =
++            std::max( nameWidth, FormatResourceName( e.key.name ).size() );
++    }
++
++    Out::Print(
++        L"{:<{}}  {:<{}}  {:>6}  {:>10}  {:<5}  {:>10}\n",
++        L"TYPE",
++        typeWidth,
++        L"NAME",
++        nameWidth,
++        L"LANG",
++        L"SIZE",
++        L"CODEC",
++        L"CONTENT" );
++    for( const auto& e : entries ) {
++        std::wstring codec = L"-";
++        std::wstring content = L"-";
++        if( e.codec != CodecId::None ) {
++            codec = std::wstring( CodecName( e.codec ) );
++            if( e.contentSize ) {
++                content = std::format( L"{}", *e.contentSize );
++            }
++            else if( !IsCodecAvailable( e.codec ) ) {
++                content = L"?";
++            }
++        }
++        Out::Print(
++            L"{:<{}}  {:<{}}  {:>6}  {:>10}  {:<5}  {:>10}\n",
++            FormatResourceType( e.key.type ),
++            typeWidth,
++            FormatResourceName( e.key.name ),
++            nameWidth,
++            *e.key.lang,
++            e.size,
++            codec,
++            content );
++    }
++    return kOk;
++}
++
++int RunGet( const ParsedArgs& args )
++{
++    const auto key = ParseKey( args, true );
++    if( !key ) {
++        return kUsage;
++    }
++    auto engine = MakeWin32Engine();
++    std::vector< uint8_t > data;
++    if( const auto ec =
++            Get( *engine, args.pePath, *key, args.Has( L"raw" ), data ) ) {
++        return Report( ec, args.pePath, *key );
++    }
++
++    const auto outputPath = OutputPath( args );
++    if( !outputPath ) {
++        return kUsage;
++    }
++    const auto output = *outputPath;
++    if( const auto ec = WriteFile( output, data ) ) {
++        Log::Error(
++            L"Failed to write '{}' [{}]", output.wstring(), FormatError( ec ) );
++        return kFailure;
++    }
++    Log::Info( L"Wrote {} bytes to '{}'", data.size(), output.wstring() );
++    return kOk;
++}
++
++int RunSet( const ParsedArgs& args )
++{
++    const auto key = ParseKey( args, true );
++    if( !key ) {
++        return kUsage;
++    }
++    const auto codec = ParseCompress( args );
++    if( !codec ) {
++        return kUsage;
++    }
++
++    std::vector< uint8_t > data;
++    if( const auto value = args.Value( L"value" ) ) {
++        const auto utf8 = Utf16ToUtf8( *value );
++        if( !utf8 ) {
++            Log::Error(
++                L"--value is not valid UTF-16 [{}]",
++                FormatError( utf8.error() ) );
++            return kFailure;
++        }
++        data.assign( utf8->begin(), utf8->end() );
++    }
++    else if( const auto value16 = args.Value( L"value-utf16" ) ) {
++        const auto* bytes =
++            reinterpret_cast< const uint8_t* >( value16->data() );
++        data.assign( bytes, bytes + value16->size() * sizeof( wchar_t ) );
++    }
++    else {
++        const auto valuePath = args.Value( L"value-path" );
++        if( !valuePath ) {
++            return kUsage;
++        }
++        const fs::path path{ std::wstring( *valuePath ) };
++        auto content = ReadFile( path );
++        if( !content ) {
++            Log::Error(
++                L"Failed to read '{}' [{}]",
++                path.wstring(),
++                FormatError( content.error() ) );
++            return kFailure;
++        }
++        data = std::move( *content );
++    }
++
++    auto engine = MakeWin32Engine();
++    if( const auto ec = Set(
++            *engine, args.pePath, *key, data, *codec, OutputPath( args ) ) ) {
++        return Report( ec, args.pePath, *key );
++    }
++    Log::Info(
++        L"Set {}/{} ({} bytes{})",
++        FormatResourceType( key->type ),
++        FormatResourceName( key->name ),
++        data.size(),
++        *codec == CodecId::None
++            ? L""
++            : std::format( L", {} compressed", CodecName( *codec ) ) );
++    return kOk;
++}
++
++int RunRemove( const ParsedArgs& args )
++{
++    const auto key = ParseKey( args, true );
++    if( !key ) {
++        return kUsage;
++    }
++    auto engine = MakeWin32Engine();
++    if( const auto ec =
++            Remove( *engine, args.pePath, *key, OutputPath( args ) ) ) {
++        return Report( ec, args.pePath, *key );
++    }
++    Log::Info(
++        L"Removed {}/{}",
++        FormatResourceType( key->type ),
++        FormatResourceName( key->name ) );
++    return kOk;
++}
++
++int RunHexdump( const ParsedArgs& args )
++{
++    const auto key = ParseKey( args, true );
++    if( !key ) {
++        return kUsage;
++    }
++    const auto limit = ParseLimit( args );
++    if( !limit ) {
++        return kUsage;
++    }
++    auto engine = MakeWin32Engine();
++    std::wstring text;
++    if( const auto ec = Hexdump(
++            *engine, args.pePath, *key, args.Has( L"raw" ), *limit, text ) ) {
++        return Report( ec, args.pePath, *key );
++    }
++    Out::Write( text );
++    return kOk;
++}
++
++const CommandSpec kCommands[] = {
++    { L"list",
++      L"List resources with size and detected compression",
++      kListOptions,
++      ValidateList,
++      RunList },
++    { L"get",
++      L"Extract one resource to a file (decompressed unless --raw)",
++      kGetOptions,
++      ValidateKeyOnly,
++      RunGet },
++    { L"set",
++      L"Add or replace one resource",
++      kSetOptions,
++      ValidateSet,
++      RunSet },
++    { L"remove",
++      L"Delete one resource",
++      kRemoveOptions,
++      ValidateKeyOnly,
++      RunRemove },
++    { L"hexdump",
++      L"Print one resource as hex and ASCII",
++      kHexdumpOptions,
++      ValidateHexdump,
++      RunHexdump },
++};
++
++}  // namespace
++
++std::span< const CommandSpec > Commands()
++{
++    return kCommands;
++}
++
++}  // namespace rcedit::cli
+diff --git a/src/cli/commands.h b/src/cli/commands.h
+new file mode 100644
+index 0000000..59a34dd
+--- /dev/null
++++ b/src/cli/commands.h
+@@ -0,0 +1,19 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#pragma once
++
++#include <span>
++
++#include "cli/args.h"
++
++namespace rcedit::cli {
++
++// list, get, set, remove, hexdump.
++[[nodiscard]] std::span< const CommandSpec > Commands();
++
++}  // namespace rcedit::cli
+diff --git a/src/cli/main.cpp b/src/cli/main.cpp
+index c1363cb..f8b6861 100644
+--- a/src/cli/main.cpp
++++ b/src/cli/main.cpp
+@@ -1,16 +1,79 @@
+ //
+ // SPDX-License-Identifier: LGPL-2.1-or-later
+ //
+ // Copyright 2026 ANSSI. All Rights Reserved.
+ //
+ // Author(s): fabienfl (ANSSI)
+ //
+-#include <print>
++#include <exception>
++#include <span>
++#include <string>
++#include <vector>
+ 
++#include <windows.h>
++
++#include "cli/args.h"
++#include "cli/commands.h"
++#include "core/encoding.h"
++#include "core/log.h"
++#include "core/output.h"
+ #include "core/version.h"
+ 
+-int wmain( int, const wchar_t* const[] )
++namespace {
++
++constexpr int kUsageError = 2;
++
++int Main( std::span< const std::wstring > argv )
+ {
+-    std::print( "rcedit {}\n", rcedit::Version() );
+-    return 0;
++    using namespace rcedit;
++    using namespace rcedit::cli;
++
++    const auto commands = Commands();
++    auto parsed = Parse( argv, commands );
++    if( !parsed ) {
++        Log::Error( L"{}", parsed.error().message );
++        const auto* command = parsed.error().command;
++        Log::Write(
++            Log::Level::Error,
++            command ? FormatCommandUsage( *command )
++                    : FormatUsage( commands ) );
++        return kUsageError;
++    }
++
++    if( parsed->version ) {
++        Out::Print( L"rcedit {}\n", AnsiToUtf16( Version() ) );
++        return 0;
++    }
++    if( parsed->help ) {
++        Out::Write(
++            parsed->command ? FormatCommandUsage( *parsed->command )
++                            : FormatUsage( commands ) );
++        return 0;
++    }
++
++    Log::SetLevel(
++        parsed->verbose     ? Log::Level::Debug
++            : parsed->quiet ? Log::Level::Error
++                            : Log::Level::Info );
++    return parsed->command->run( *parsed );
++}
++
++}  // namespace
++
++int wmain( int argc, wchar_t* argv[] )
++{
++    ::SetConsoleOutputCP( CP_UTF8 );
++
++    try {
++        std::vector< std::wstring > args;
++        for( int i = 1; i < argc; ++i ) {
++            args.emplace_back( argv[ i ] );
++        }
++        return Main( args );
++    }
++    catch( const std::exception& e ) {
++        rcedit::Log::Error(
++            L"Unexpected exception: {}", rcedit::AnsiToUtf16( e.what() ) );
++        return 1;
++    }
+ }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 48b17c9..2955b75 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -11,21 +11,23 @@ add_executable(rcedit_tests
+     temp.h
+     main.cpp
+     test_version.cpp
+     test_error.cpp
+     test_encoding.cpp
+     test_resource_id.cpp
+     test_codec.cpp
+     test_engine.cpp
+     test_ops.cpp
+     test_args.cpp
++    test_commands.cpp
+     "${CMAKE_SOURCE_DIR}/src/cli/args.cpp"
++    "${CMAKE_SOURCE_DIR}/src/cli/commands.cpp"
+ )
+ target_link_libraries(rcedit_tests PRIVATE rcedit_core)
+ target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
+ if(RCEDIT_ENABLE_7Z)
+     # test_sevenzip.cpp unit-tests OutMemStream directly (guarded by
+     # RCEDIT_HAS_7Z), so it includes core/sevenzip/out_mem_stream.h and,
+     # transitively, <7zip/7zip.h>. rcedit_core links 7zip PRIVATE, so its
+     # include dirs do not propagate here; expose the overlay port's top-level
+     # header root to this target the same way src/core does. The OutMemStream
+@@ -51,21 +53,21 @@ if(RCEDIT_ENABLE_ZSTD)
+     target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
+ endif()
+ 
+ add_executable(rcedit_fixture fixture/fixture.c fixture/fixture.rc)
+ add_dependencies(rcedit_tests rcedit_fixture)
+ # MSVC's linker embeds a default manifest (RT_MANIFEST #1, lang 1033) unless
+ # suppressed; the fixture's baseline must contain only its RCDATA resource.
+ target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
+ 
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+-set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args)
++set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args commands)
+ if(RCEDIT_ENABLE_7Z)
+     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
+ endif()
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group} $<TARGET_FILE:rcedit_fixture>)
+ endforeach()
+ 
+ # Import allowlist check on a target's real executable.
+ get_filename_component(_vc_bin "${CMAKE_LINKER}" DIRECTORY)
+ find_program(RCEDIT_DUMPBIN dumpbin HINTS "${_vc_bin}" REQUIRED)
+@@ -75,15 +77,46 @@ function(rcedit_add_import_check target)
+     if(RCEDIT_ENABLE_7Z)
+         list(APPEND allowed "OLEAUT32.dll")
+     endif()
+ 
+     add_test(
+         NAME imports
+         COMMAND "${CMAKE_COMMAND}"
+             "-DDUMPBIN=${RCEDIT_DUMPBIN}"
+             "-DEXE=$<TARGET_FILE:${target}>"
+             "-DALLOWED=${allowed}"
++            "-DCONFIG=$<CONFIG>"
+             -P "${CMAKE_CURRENT_SOURCE_DIR}/check_imports.cmake"
+     )
+ endfunction()
+ 
+ rcedit_add_import_check(rcedit)
++
++# End-to-end smoke test on the real rcedit.exe.
++set(RCEDIT_SMOKE_CODEC "")
++if(RCEDIT_ENABLE_ZSTD)
++    set(RCEDIT_SMOKE_CODEC "zstd")
++elseif(RCEDIT_ENABLE_7Z)
++    set(RCEDIT_SMOKE_CODEC "7z")
++endif()
++
++add_test(
++    NAME cli_smoke
++    COMMAND "${CMAKE_COMMAND}"
++        "-DRCEDIT=$<TARGET_FILE:rcedit>"
++        "-DFIXTURE=$<TARGET_FILE:rcedit_fixture>"
++        "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/smoke/$<CONFIG>"
++        "-DCODEC=${RCEDIT_SMOKE_CODEC}"
++        -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_smoke.cmake"
++)
++
++if(RCEDIT_ENABLE_ZSTD AND RCEDIT_ENABLE_7Z)
++    add_test(
++        NAME cli_smoke_7z
++        COMMAND "${CMAKE_COMMAND}"
++            "-DRCEDIT=$<TARGET_FILE:rcedit>"
++            "-DFIXTURE=$<TARGET_FILE:rcedit_fixture>"
++            "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/smoke7z/$<CONFIG>"
++            "-DCODEC=7z"
++            -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_smoke.cmake"
++    )
++endif()
+diff --git a/tests/check_imports.cmake b/tests/check_imports.cmake
+index dd34c92..097bf1a 100644
+--- a/tests/check_imports.cmake
++++ b/tests/check_imports.cmake
+@@ -5,20 +5,29 @@
+ #
+ # Author(s): fabienfl (ANSSI)
+ #
+ # Usage: cmake -DDUMPBIN=<path> -DEXE=<path> -DALLOWED="KERNEL32.dll;OLEAUT32.dll" -P check_imports.cmake
+ # Fails when the executable imports any DLL outside ALLOWED (case-insensitive).
+ 
+ if(NOT DUMPBIN OR NOT EXE OR NOT DEFINED ALLOWED)
+     message(FATAL_ERROR "check_imports.cmake needs DUMPBIN, EXE and ALLOWED")
+ endif()
+ 
++# The import allowlist hardens the distributed (release) binary. Debug builds
++# are dev-only and never shipped; without optimization/OPT:REF they retain
++# upstream 7-Zip's guarded-but-unreached USER32 DBCS helpers (e.g. CharPrevExA
++# in HasTailSlash, dead under rcedit's always-CP_UTF8 usage). Don't gate them.
++if(CONFIG STREQUAL "Debug")
++    message(STATUS "imports check skipped for Debug build (dev-only, not the distributed artifact)")
++    return()
++endif()
++
+ execute_process(
+     COMMAND "${DUMPBIN}" /nologo /imports "${EXE}"
+     OUTPUT_VARIABLE output
+     RESULT_VARIABLE result
+ )
+ if(NOT result EQUAL 0)
+     message(FATAL_ERROR "dumpbin failed (${result}) on ${EXE}")
+ endif()
+ 
+ set(allowed_upper "")
+diff --git a/tests/cli_smoke.cmake b/tests/cli_smoke.cmake
+new file mode 100644
+index 0000000..a31358c
+--- /dev/null
++++ b/tests/cli_smoke.cmake
+@@ -0,0 +1,114 @@
++#
++# SPDX-License-Identifier: LGPL-2.1-or-later
++#
++# Copyright 2026 ANSSI. All Rights Reserved.
++#
++# Author(s): fabienfl (ANSSI)
++#
++# Usage: cmake -DRCEDIT=<exe> -DFIXTURE=<exe> -DWORKDIR=<dir> [-DCODEC=zstd] -P cli_smoke.cmake
++# Drives the built rcedit.exe through set/list/get/hexdump/remove on a copy of the fixture.
++
++if(NOT RCEDIT OR NOT FIXTURE OR NOT WORKDIR)
++    message(FATAL_ERROR "cli_smoke.cmake needs RCEDIT, FIXTURE and WORKDIR")
++endif()
++
++file(REMOVE_RECURSE "${WORKDIR}")
++file(MAKE_DIRECTORY "${WORKDIR}")
++set(PE "${WORKDIR}/target.exe")
++file(COPY_FILE "${FIXTURE}" "${PE}")
++
++# run(<expected_exit> <var_for_stdout> args...)
++function(run expected outvar)
++    execute_process(
++        COMMAND "${RCEDIT}" ${ARGN}
++        RESULT_VARIABLE rc
++        OUTPUT_VARIABLE out
++        ERROR_VARIABLE err
++    )
++    if(NOT rc EQUAL expected)
++        message(FATAL_ERROR "rcedit ${ARGN}\nexpected exit ${expected}, got ${rc}\nstdout:\n${out}\nstderr:\n${err}")
++    endif()
++    set(${outvar} "${out}" PARENT_SCOPE)
++endfunction()
++
++function(expect_match text pattern what)
++    if(NOT text MATCHES "${pattern}")
++        message(FATAL_ERROR "${what}: expected to match '${pattern}', got:\n${text}")
++    endif()
++endfunction()
++
++function(expect_no_match text pattern what)
++    if(text MATCHES "${pattern}")
++        message(FATAL_ERROR "${what}: expected no match for '${pattern}', got:\n${text}")
++    endif()
++endfunction()
++
++# usage errors
++run(2 out)
++run(2 out list)
++run(2 out list "${PE}" --bogus)
++run(2 out set "${PE}" -t RT_RCDATA -n CONFIG)
++run(0 out --version)
++expect_match("${out}" "rcedit [0-9]+\\.[0-9]+\\.[0-9]+" "--version")
++run(0 out --help)
++expect_match("${out}" "Commands:" "--help")
++run(0 out set --help)
++expect_match("${out}" "--value-path" "set --help")
++
++# baseline
++run(0 out list "${PE}")
++expect_match("${out}" "RT_RCDATA +FIXTURE +0 +7 +-" "list baseline")
++
++# set / list / get / hexdump
++run(0 out set "${PE}" -t RT_RCDATA -n CONFIG --value "<config/>")
++run(0 out list "${PE}")
++expect_match("${out}" "RT_RCDATA +CONFIG +0 +9 +-" "list after set")
++
++run(0 out get "${PE}" -t RCDATA -n CONFIG -o "${WORKDIR}/config.bin")
++file(READ "${WORKDIR}/config.bin" content)
++if(NOT content STREQUAL "<config/>")
++    message(FATAL_ERROR "get returned '${content}'")
++endif()
++
++run(0 out hexdump "${PE}" -t "#10" -n CONFIG)
++expect_match("${out}" "00000000  3C 63 6F 6E 66 69 67 2F  3E .*\\|<config/>\\|" "hexdump")
++
++run(0 out hexdump "${PE}" -t RT_RCDATA -n CONFIG --limit 4)
++expect_match("${out}" "5 more bytes" "hexdump --limit")
++
++# runtime errors exit 1
++run(1 out get "${PE}" -t RT_RCDATA -n MISSING -o "${WORKDIR}/x.bin")
++run(1 out list "${WORKDIR}/does-not-exist.exe")
++
++# --output leaves the source untouched
++run(0 out set "${PE}" -t RT_RCDATA -n OTHER --value-utf16 "ab" -o "${WORKDIR}/copy.exe")
++run(0 out list "${PE}")
++expect_no_match("${out}" "OTHER" "source after set --output")
++run(0 out list "${WORKDIR}/copy.exe")
++expect_match("${out}" "RT_RCDATA +OTHER +0 +4 +-" "copy after set --output")
++
++# compression, when a codec is built in
++if(CODEC)
++    run(0 out set "${PE}" -t RT_RCDATA -n PACKED --value-path "${FIXTURE}" -c "${CODEC}")
++    run(0 out list "${PE}" -n PACKED)
++    expect_match("${out}" "PACKED +0 +[0-9]+ +${CODEC} +[0-9]+" "list packed")
++    run(0 out get "${PE}" -t RT_RCDATA -n PACKED -o "${WORKDIR}/unpacked.bin")
++    file(SHA256 "${FIXTURE}" expected_hash)
++    file(SHA256 "${WORKDIR}/unpacked.bin" actual_hash)
++    if(NOT expected_hash STREQUAL actual_hash)
++        message(FATAL_ERROR "decompressed payload differs from the input")
++    endif()
++    run(0 out get "${PE}" -t RT_RCDATA -n PACKED -o "${WORKDIR}/raw.bin" --raw)
++    file(SHA256 "${WORKDIR}/raw.bin" raw_hash)
++    if(raw_hash STREQUAL expected_hash)
++        message(FATAL_ERROR "--raw returned the decompressed payload")
++    endif()
++endif()
++
++# remove
++run(0 out remove "${PE}" -t RT_RCDATA -n CONFIG)
++run(0 out list "${PE}")
++expect_no_match("${out}" "CONFIG" "list after remove")
++run(1 out remove "${PE}" -t RT_RCDATA -n CONFIG)
++
++message(STATUS "cli smoke: OK")
+diff --git a/tests/main.cpp b/tests/main.cpp
+index 2d5fd2b..8d63c9e 100644
+--- a/tests/main.cpp
++++ b/tests/main.cpp
+@@ -16,35 +16,37 @@ int RunVersionTests();
+ int RunErrorTests();
+ int RunEncodingTests();
+ int RunResourceIdTests();
+ int RunCodecTests();
+ int RunEngineTests();
+ #ifdef RCEDIT_HAS_7Z
+ int RunSevenZipTests();
+ #endif
+ int RunOpsTests();
+ int RunArgsTests();
++int RunCommandsTests();
+ 
+ struct Group
+ {
+     std::string_view name;
+     int ( *run )();
+ };
+ 
+ constexpr Group kGroups[] = {
+     { "version", RunVersionTests },   { "error", RunErrorTests },
+     { "encoding", RunEncodingTests }, { "resource_id", RunResourceIdTests },
+     { "codec", RunCodecTests },       { "engine", RunEngineTests },
+ #ifdef RCEDIT_HAS_7Z
+     { "sevenzip", RunSevenZipTests },
+ #endif
+     { "ops", RunOpsTests },           { "args", RunArgsTests },
++    { "commands", RunCommandsTests },
+ };
+ 
+ }  // namespace rcedit::test
+ 
+ int wmain( int argc, wchar_t* argv[] )
+ {
+     using namespace rcedit::test;
+ 
+     if( argc < 2 ) {
+         std::print( stderr, "usage: rcedit_tests <group> [fixture_path]\n" );
+diff --git a/tests/test_commands.cpp b/tests/test_commands.cpp
+new file mode 100644
+index 0000000..af5a41d
+--- /dev/null
++++ b/tests/test_commands.cpp
+@@ -0,0 +1,297 @@
++//
++// SPDX-License-Identifier: LGPL-2.1-or-later
++//
++// Copyright 2026 ANSSI. All Rights Reserved.
++//
++// Author(s): fabienfl (ANSSI)
++//
++#include "check.h"
++
++#include "cli/args.h"
++#include "cli/commands.h"
++#include "core/codec.h"
++
++namespace rcedit::test {
++
++namespace {
++
++using namespace rcedit::cli;
++
++std::expected< ParsedArgs, UsageError > ParseOf(
++    std::initializer_list< const wchar_t* > tokens )
++{
++    std::vector< std::wstring > argv;
++    for( const wchar_t* t : tokens ) {
++        argv.emplace_back( t );
++    }
++    return Parse( argv, Commands() );
++}
++
++void FiveCommandsInOrder()
++{
++    const auto commands = Commands();
++    CHECK( commands.size() == 5 );
++    CHECK( commands[ 0 ].name == L"list" );
++    CHECK( commands[ 1 ].name == L"get" );
++    CHECK( commands[ 2 ].name == L"set" );
++    CHECK( commands[ 3 ].name == L"remove" );
++    CHECK( commands[ 4 ].name == L"hexdump" );
++    for( const auto& c : commands ) {
++        CHECK( c.run != nullptr );
++        CHECK( !c.summary.empty() );
++    }
++}
++
++void ListAcceptsFilters()
++{
++    CHECK( ParseOf( { L"list", L"a.exe" } ).has_value() );
++    CHECK(
++        ParseOf( { L"list", L"a.exe", L"-t", L"RT_RCDATA", L"-n", L"CONFIG" } )
++            .has_value() );
++    auto bad = ParseOf( { L"list", L"a.exe", L"-t", L"#0" } );
++    CHECK(
++        !bad.has_value()
++        && bad.error().message.find( L"--type" ) != std::wstring::npos );
++}
++
++void GetRequiresTypeNameOutput()
++{
++    CHECK( ParseOf(
++               { L"get",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"CONFIG",
++                 L"-o",
++                 L"out.bin" } )
++               .has_value() );
++    CHECK(
++        !ParseOf( { L"get", L"a.exe", L"-t", L"RT_RCDATA", L"-n", L"CONFIG" } )
++             .has_value() );
++    CHECK( ParseOf(
++               { L"get",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"CONFIG",
++                 L"-o",
++                 L"o",
++                 L"-l",
++                 L"0x409",
++                 L"--raw" } )
++               .has_value() );
++    auto bad = ParseOf(
++        { L"get",
++          L"a.exe",
++          L"-t",
++          L"RT_RCDATA",
++          L"-n",
++          L"CONFIG",
++          L"-o",
++          L"o",
++          L"-l",
++          L"abc" } );
++    CHECK(
++        !bad.has_value()
++        && bad.error().message.find( L"--lang" ) != std::wstring::npos );
++}
++
++void SetRequiresExactlyOneValueSource()
++{
++    CHECK( ParseOf(
++               { L"set",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"CONFIG",
++                 L"--value",
++                 L"x" } )
++               .has_value() );
++    CHECK( ParseOf(
++               { L"set",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"CONFIG",
++                 L"--value-utf16",
++                 L"x" } )
++               .has_value() );
++    CHECK( ParseOf(
++               { L"set",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"CONFIG",
++                 L"--value-path",
++                 L"f" } )
++               .has_value() );
++
++    auto none =
++        ParseOf( { L"set", L"a.exe", L"-t", L"RT_RCDATA", L"-n", L"CONFIG" } );
++    CHECK(
++        !none.has_value()
++        && none.error().message.find( L"--value" ) != std::wstring::npos );
++    auto two = ParseOf(
++        { L"set",
++          L"a.exe",
++          L"-t",
++          L"RT_RCDATA",
++          L"-n",
++          L"CONFIG",
++          L"--value",
++          L"x",
++          L"--value-path",
++          L"f" } );
++    CHECK( !two.has_value() );
++}
++
++void SetCompressValidation()
++{
++    CHECK( ParseOf(
++               { L"set",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"C",
++                 L"--value",
++                 L"x",
++                 L"-c",
++                 L"none" } )
++               .has_value() );
++
++    auto unknown = ParseOf(
++        { L"set",
++          L"a.exe",
++          L"-t",
++          L"RT_RCDATA",
++          L"-n",
++          L"C",
++          L"--value",
++          L"x",
++          L"-c",
++          L"lz4" } );
++    CHECK(
++        !unknown.has_value()
++        && unknown.error().message.find( L"lz4" ) != std::wstring::npos );
++
++    auto zstd = ParseOf(
++        { L"set",
++          L"a.exe",
++          L"-t",
++          L"RT_RCDATA",
++          L"-n",
++          L"C",
++          L"--value",
++          L"x",
++          L"-c",
++          L"zstd" } );
++    auto sevenZip = ParseOf(
++        { L"set",
++          L"a.exe",
++          L"-t",
++          L"RT_RCDATA",
++          L"-n",
++          L"C",
++          L"--value",
++          L"x",
++          L"-c",
++          L"7z" } );
++#ifdef RCEDIT_HAS_ZSTD
++    CHECK( zstd.has_value() );
++#else
++    CHECK(
++        !zstd.has_value()
++        && zstd.error().message.find( L"disabled" ) != std::wstring::npos );
++#endif
++#ifdef RCEDIT_HAS_7Z
++    CHECK( sevenZip.has_value() );
++#else
++    CHECK(
++        !sevenZip.has_value()
++        && sevenZip.error().message.find( L"disabled" ) != std::wstring::npos );
++#endif
++}
++
++void RemoveAndHexdump()
++{
++    CHECK( ParseOf( { L"remove", L"a.exe", L"-t", L"RT_RCDATA", L"-n", L"C" } )
++               .has_value() );
++    CHECK( ParseOf(
++               { L"remove",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"C",
++                 L"-o",
++                 L"b.exe" } )
++               .has_value() );
++    CHECK(
++        !ParseOf( { L"remove", L"a.exe", L"-t", L"RT_RCDATA" } ).has_value() );
++
++    CHECK( ParseOf(
++               { L"hexdump",
++                 L"a.exe",
++                 L"-t",
++                 L"RT_RCDATA",
++                 L"-n",
++                 L"C",
++                 L"--limit",
++                 L"32" } )
++               .has_value() );
++    auto bad = ParseOf(
++        { L"hexdump",
++          L"a.exe",
++          L"-t",
++          L"RT_RCDATA",
++          L"-n",
++          L"C",
++          L"--limit",
++          L"x" } );
++    CHECK(
++        !bad.has_value()
++        && bad.error().message.find( L"--limit" ) != std::wstring::npos );
++}
++
++void CompressHelpListsCompiledCodecs()
++{
++    const std::wstring usage = FormatCommandUsage( Commands()[ 2 ] );
++    CHECK( usage.find( L"none" ) != std::wstring::npos );
++    const bool mentionsZstd = usage.find( L"zstd" ) != std::wstring::npos;
++    const bool mentions7z = usage.find( L"7z" ) != std::wstring::npos;
++#ifdef RCEDIT_HAS_ZSTD
++    CHECK( mentionsZstd );
++#else
++    CHECK( !mentionsZstd );
++#endif
++#ifdef RCEDIT_HAS_7Z
++    CHECK( mentions7z );
++#else
++    CHECK( !mentions7z );
++#endif
++}
++
++constexpr TestCase kCases[] = {
++    { "FiveCommandsInOrder", FiveCommandsInOrder },
++    { "ListAcceptsFilters", ListAcceptsFilters },
++    { "GetRequiresTypeNameOutput", GetRequiresTypeNameOutput },
++    { "SetRequiresExactlyOneValueSource", SetRequiresExactlyOneValueSource },
++    { "SetCompressValidation", SetCompressValidation },
++    { "RemoveAndHexdump", RemoveAndHexdump },
++    { "CompressHelpListsCompiledCodecs", CompressHelpListsCompiledCodecs },
++};
++
++}  // namespace
++
++int RunCommandsTests()
++{
++    return RunGroup( "commands", kCases );
++}
++
++}  // namespace rcedit::test

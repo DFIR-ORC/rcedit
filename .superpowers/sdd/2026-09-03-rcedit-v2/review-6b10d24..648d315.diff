@@ -1,0 +1,715 @@
+# Review package: 6b10d24..648d315
+
+## Commits
+648d315 Final review fixes: guard callback boundaries, tidy output-on-failure, CI hardening
+
+## Files changed
+ .github/workflows/build.yml            |  4 ++
+ src/cli/CMakeLists.txt                 |  9 +++-
+ src/core/engine_win32.cpp              | 85 ++++++++++++++++++++++++----------
+ src/core/ops.cpp                       | 30 +++++++++++-
+ src/core/sevenzip/extract_callback.cpp | 12 +++--
+ src/core/sevenzip/update_callback.cpp  | 66 +++++++++++++++-----------
+ tests/CMakeLists.txt                   |  5 +-
+ tests/test_ops.cpp                     | 49 ++++++++++++++++++++
+ 8 files changed, 200 insertions(+), 60 deletions(-)
+
+## Diff
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index 1a515db..35b2a03 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -3,23 +3,27 @@
+ # changed to a malicious commit. If necessary prefer to fork the action.
+ #
+ name: rcedit
+ 
+ on:
+   push:
+     branches: ["**"]
+     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+   pull_request:
+ 
++permissions:
++  contents: read
++
+ jobs:
+   build:
+     runs-on: windows-2025
++    timeout-minutes: 60
+     strategy:
+       fail-fast: false
+       matrix:
+         preset: [default, no-7z, no-zstd, minimal]
+         include:
+           - preset: default
+             extra_config: Debug
+ 
+     steps:
+       - uses: actions/checkout@v4
+diff --git a/src/cli/CMakeLists.txt b/src/cli/CMakeLists.txt
+index 4dcf048..cd01293 100644
+--- a/src/cli/CMakeLists.txt
++++ b/src/cli/CMakeLists.txt
+@@ -8,21 +8,28 @@
+ add_executable(rcedit
+     main.cpp
+     args.h
+     args.cpp
+     commands.h
+     commands.cpp
+ )
+ 
+ target_link_libraries(rcedit PRIVATE rcedit_core)
+ 
+-# Anti side-loading link policy: no default libraries, explicit allowlist.
++# Anti side-loading link policy. /NODEFAULTLIB drops the libs the CRT would
++# otherwise pull in via #pragma comment(lib, ...); CMake's implicit
++# CMAKE_CXX_STANDARD_LIBRARIES (gdi32.lib, shell32.lib, ole32.lib,
++# user32.lib, etc.) still lands on the link line regardless, so the explicit
++# lib list below is not itself the guarantee that those libs contribute no
++# imports -- it's just what rcedit actually needs. The real guarantee is the
++# "imports" CTest (check_imports.cmake), which inspects the built exe's real
++# PE import table.
+ target_link_options(rcedit PRIVATE /NODEFAULTLIB /DEBUG /OPT:REF /OPT:ICF)
+ 
+ set(RCEDIT_CRT_LIBS
+     $<IF:$<CONFIG:Debug>,libcmtd.lib,libcmt.lib>
+     $<IF:$<CONFIG:Debug>,libucrtd.lib,libucrt.lib>
+     $<IF:$<CONFIG:Debug>,libvcruntimed.lib,libvcruntime.lib>
+     $<IF:$<CONFIG:Debug>,libcpmtd.lib,libcpmt.lib>
+ )
+ 
+ target_link_libraries(rcedit PRIVATE kernel32.lib ${RCEDIT_CRT_LIBS})
+diff --git a/src/core/engine_win32.cpp b/src/core/engine_win32.cpp
+index 47e0d03..6aa16f1 100644
+--- a/src/core/engine_win32.cpp
++++ b/src/core/engine_win32.cpp
+@@ -26,77 +26,102 @@ bool IsNotFound( unsigned long code ) noexcept
+ }
+ 
+ bool IsEnumerationEnd( unsigned long code ) noexcept
+ {
+     return code == ERROR_RESOURCE_DATA_NOT_FOUND || IsNotFound( code )
+         || code == ERROR_RESOURCE_ENUM_USER_STOP || code == ERROR_SUCCESS;
+ }
+ 
+ struct EnumContext
+ {
+-    HMODULE module = nullptr;
+     std::vector< ResourceEntry >* entries = nullptr;
+     std::error_code ec;
+     ResourceId type;
+     ResourceId name;
+ };
+ 
++// These callbacks are invoked by kernel32 across a plain C frame; no
++// exception (e.g. std::bad_alloc from a std::wstring/push_back/new) may
++// escape. Returning FALSE stops enumeration, which Enumerate() reports as
++// ctx.ec/GetLastError, so a caught exception is surfaced as an error rather
++// than a silently-truncated success.
+ BOOL CALLBACK OnLanguage(
+     HMODULE module,
+     LPCWSTR type,
+     LPCWSTR name,
+     WORD lang,
+     LONG_PTR param )
+ {
+     auto* ctx = reinterpret_cast< EnumContext* >( param );
+ 
+-    HRSRC found = ::FindResourceExW( module, type, name, lang );
+-    if( found == nullptr ) {
+-        ctx->ec = LastWin32Error();
++    try {
++        HRSRC found = ::FindResourceExW( module, type, name, lang );
++        if( found == nullptr ) {
++            ctx->ec = LastWin32Error();
++            return FALSE;
++        }
++
++        const DWORD size = ::SizeofResource( module, found );
++        ctx->entries->push_back(
++            ResourceEntry{ ResourceKey{ ctx->type, ctx->name, lang }, size } );
++        return TRUE;
++    }
++    catch( ... ) {
++        ctx->ec = std::make_error_code( std::errc::not_enough_memory );
+         return FALSE;
+     }
+-
+-    const DWORD size = ::SizeofResource( module, found );
+-    ctx->entries->push_back(
+-        ResourceEntry{ ResourceKey{ ctx->type, ctx->name, lang }, size } );
+-    return TRUE;
+ }
+ 
+ BOOL CALLBACK
+ OnName( HMODULE module, LPCWSTR type, LPWSTR name, LONG_PTR param )
+ {
+     auto* ctx = reinterpret_cast< EnumContext* >( param );
+-    ctx->name = FromLpcwstr( name );
+ 
+-    if( !::EnumResourceLanguagesW( module, type, name, OnLanguage, param ) ) {
+-        const DWORD code = ::GetLastError();
+-        if( !IsEnumerationEnd( code ) ) {
+-            ctx->ec = Win32Error( code );
+-            return FALSE;
++    try {
++        ctx->name = FromLpcwstr( name );
++
++        if( !::EnumResourceLanguagesW(
++                module, type, name, OnLanguage, param ) ) {
++            const DWORD code = ::GetLastError();
++            if( !IsEnumerationEnd( code ) ) {
++                ctx->ec = Win32Error( code );
++                return FALSE;
++            }
+         }
++        return ctx->ec ? FALSE : TRUE;
++    }
++    catch( ... ) {
++        ctx->ec = std::make_error_code( std::errc::not_enough_memory );
++        return FALSE;
+     }
+-    return ctx->ec ? FALSE : TRUE;
+ }
+ 
+ BOOL CALLBACK OnType( HMODULE module, LPWSTR type, LONG_PTR param )
+ {
+     auto* ctx = reinterpret_cast< EnumContext* >( param );
+-    ctx->type = FromLpcwstr( type );
+ 
+-    if( !::EnumResourceNamesW( module, type, OnName, param ) ) {
+-        const DWORD code = ::GetLastError();
+-        if( !IsEnumerationEnd( code ) ) {
+-            ctx->ec = Win32Error( code );
+-            return FALSE;
++    try {
++        ctx->type = FromLpcwstr( type );
++
++        if( !::EnumResourceNamesW( module, type, OnName, param ) ) {
++            const DWORD code = ::GetLastError();
++            if( !IsEnumerationEnd( code ) ) {
++                ctx->ec = Win32Error( code );
++                return FALSE;
++            }
+         }
++        return ctx->ec ? FALSE : TRUE;
++    }
++    catch( ... ) {
++        ctx->ec = std::make_error_code( std::errc::not_enough_memory );
++        return FALSE;
+     }
+-    return ctx->ec ? FALSE : TRUE;
+ }
+ 
+ struct LangMatchContext
+ {
+     WORD wanted = 0;
+     bool found = false;
+ };
+ 
+ // Records whether the wanted language is present, stopping the enumeration
+ // as soon as it is seen. Used to sidestep FindResourceExW's language
+@@ -154,21 +179,20 @@ public:
+     }
+ 
+     std::error_code Enumerate( std::vector< ResourceEntry >& entries ) override
+     {
+         if( !m_module ) {
+             return std::make_error_code( std::errc::operation_not_permitted );
+         }
+ 
+         std::vector< ResourceEntry > found;
+         EnumContext ctx;
+-        ctx.module = m_module.get();
+         ctx.entries = &found;
+ 
+         if( !::EnumResourceTypesW(
+                 m_module.get(),
+                 OnType,
+                 reinterpret_cast< LONG_PTR >( &ctx ) ) ) {
+             const DWORD code = ::GetLastError();
+             if( ctx.ec ) {
+                 return ctx.ec;
+             }
+@@ -287,20 +311,29 @@ public:
+         if( !::EndUpdateResourceW( handle, FALSE ) ) {
+             const auto ec = LastWin32Error();
+             Log::Debug( L"Failed EndUpdateResourceW [{}]", FormatError( ec ) );
+             return ec;
+         }
+         return {};
+     }
+ 
+     void Discard() override
+     {
++        // Also releases the exclusive read-only mapping from Open(), even
++        // when no update session was started yet (e.g. Remove() failed to
++        // resolve its target before ever calling Write/Remove). Without
++        // this, a caller that deletes the underlying file right after a
++        // discarded session (e.g. to clean up a doomed --output copy) would
++        // hit a sharing violation, since Open()'s LOAD_LIBRARY_AS_DATAFILE_
++        // EXCLUSIVE mapping does not grant FILE_SHARE_DELETE.
++        m_module.reset();
++
+         if( m_update == nullptr ) {
+             return;
+         }
+         HANDLE handle = m_update;
+         m_update = nullptr;
+         if( !::EndUpdateResourceW( handle, TRUE ) ) {
+             Log::Debug(
+                 L"Failed EndUpdateResourceW (discard) [{}]",
+                 FormatError( LastWin32Error() ) );
+         }
+@@ -325,21 +358,23 @@ private:
+                 ToLpcwstr( key.name ),
+                 OnLanguageMatch,
+                 reinterpret_cast< LONG_PTR >( &ctx ) ) ) {
+             // The early stop on a match surfaces as a failure with
+             // GetLastError() set to ERROR_RESOURCE_ENUM_USER_STOP; the flag is
+             // authoritative.
+             if( ctx.found ) {
+                 return {};
+             }
+             const DWORD code = ::GetLastError();
+-            if( IsNotFound( code ) ) {
++            // ERROR_RESOURCE_DATA_NOT_FOUND (1812) is also a not-found here:
++            // IsNotFound() only covers type/name/lang (1813-1815).
++            if( IsNotFound( code ) || code == ERROR_RESOURCE_DATA_NOT_FOUND ) {
+                 return make_error_code( errc::resource_not_found );
+             }
+             return Win32Error( code );
+         }
+         return ctx.found ? std::error_code{}
+                          : make_error_code( errc::resource_not_found );
+     }
+ 
+     // Validates a write and opens the update session on first use.
+     std::error_code BeginUpdate( const ResourceKey& key )
+diff --git a/src/core/ops.cpp b/src/core/ops.cpp
+index 3c6d86e..4951c48 100644
+--- a/src/core/ops.cpp
++++ b/src/core/ops.cpp
+@@ -94,20 +94,33 @@ std::error_code CopyToOutput(
+     if( ec ) {
+         Log::Debug(
+             L"Failed to copy '{}' to '{}' [{}]",
+             pe.wstring(),
+             output->wstring(),
+             FormatError( ec ) );
+     }
+     return ec;
+ }
+ 
++// Best-effort cleanup for a failure that occurs after CopyToOutput has
++// already created 'output': removes it so a doomed Set/Remove does not leave
++// a stray copy behind. A no-op when 'output' was not given. The remove's own
++// error is ignored; 'pe' is never touched.
++void RemoveStrayOutput( const std::optional< fs::path >& output )
++{
++    if( !output ) {
++        return;
++    }
++    std::error_code ec;
++    fs::remove( *output, ec );
++}
++
+ }  // namespace
+ 
+ bool IsRunningExecutable( const fs::path& path )
+ {
+     wchar_t self[ MAX_PATH ];
+     const DWORD length = ::GetModuleFileNameW( nullptr, self, MAX_PATH );
+     if( length == 0 || length >= MAX_PATH ) {
+         return false;
+     }
+ 
+@@ -255,58 +268,71 @@ std::error_code Set(
+     if( const auto ec = CopyToOutput( pe, output ) ) {
+         return ec;
+     }
+ 
+     ResourceKey resolved = key;
+     if( !resolved.lang ) {
+         resolved.lang = 0;
+     }
+ 
+     if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
++        RemoveStrayOutput( output );
+         return ec;
+     }
+     if( const auto ec = engine.Write( resolved, payload ) ) {
+         engine.Discard();
++        RemoveStrayOutput( output );
+         return ec;
+     }
+-    return engine.Commit();
++    if( const auto ec = engine.Commit() ) {
++        RemoveStrayOutput( output );
++        return ec;
++    }
++    return {};
+ }
+ 
+ std::error_code Remove(
+     ResourceEngine& engine,
+     const fs::path& pe,
+     const ResourceKey& key,
+     const std::optional< fs::path >& output )
+ {
+     fs::path target;
+     if( const auto ec = SelectTarget( pe, output, target ) ) {
+         return ec;
+     }
+     if( const auto ec = CopyToOutput( pe, output ) ) {
+         return ec;
+     }
+ 
+     if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
++        RemoveStrayOutput( output );
+         return ec;
+     }
+ 
+     ResourceKey resolved;
+     std::vector< uint16_t > candidates;
+     if( const auto ec = ResolveLanguage( engine, key, resolved, candidates ) ) {
+         engine.Discard();
++        RemoveStrayOutput( output );
+         return ec;
+     }
+     if( const auto ec = engine.Remove( resolved ) ) {
+         engine.Discard();
++        RemoveStrayOutput( output );
+         return ec;
+     }
+-    return engine.Commit();
++    if( const auto ec = engine.Commit() ) {
++        RemoveStrayOutput( output );
++        return ec;
++    }
++    return {};
+ }
+ 
+ std::error_code Hexdump(
+     ResourceEngine& engine,
+     const fs::path& pe,
+     const ResourceKey& key,
+     bool raw,
+     std::optional< size_t > limit,
+     std::wstring& out )
+ {
+diff --git a/src/core/sevenzip/extract_callback.cpp b/src/core/sevenzip/extract_callback.cpp
+index 1c1b774..ceb0bda 100644
+--- a/src/core/sevenzip/extract_callback.cpp
++++ b/src/core/sevenzip/extract_callback.cpp
+@@ -35,23 +35,29 @@ Z7_COM7F_IMF(
+     if( outStream == nullptr ) {
+         return E_POINTER;
+     }
+     *outStream = nullptr;
+ 
+     if( index != 0
+         || askExtractMode != NArchive::NExtract::NAskMode::kExtract ) {
+         return S_OK;
+     }
+ 
+-    m_output.clear();
+-    CMyComPtr< ISequentialOutStream > stream = new OutMemStream( m_output );
+-    *outStream = stream.Detach();
++    // Invoked by 7-Zip across a COM frame; no exception may escape.
++    try {
++        m_output.clear();
++        CMyComPtr< ISequentialOutStream > stream = new OutMemStream( m_output );
++        *outStream = stream.Detach();
++    }
++    catch( ... ) {
++        return E_OUTOFMEMORY;
++    }
+     return S_OK;
+ }
+ 
+ Z7_COM7F_IMF( ExtractCallback::PrepareOperation( Int32 /*askExtractMode*/ ) )
+ {
+     return S_OK;
+ }
+ 
+ Z7_COM7F_IMF( ExtractCallback::SetOperationResult( Int32 operationResult ) )
+ {
+diff --git a/src/core/sevenzip/update_callback.cpp b/src/core/sevenzip/update_callback.cpp
+index ed2b65f..e022e28 100644
+--- a/src/core/sevenzip/update_callback.cpp
++++ b/src/core/sevenzip/update_callback.cpp
+@@ -52,65 +52,77 @@ Z7_COM7F_IMF(
+ Z7_COM7F_IMF(
+     UpdateCallback::GetProperty(
+         UInt32 index,
+         PROPID propID,
+         PROPVARIANT* value ) )
+ {
+     if( index != 0 ) {
+         return E_INVALIDARG;
+     }
+ 
+-    NWindows::NCOM::CPropVariant prop;
+-    switch( propID ) {
+-        case kpidPath:
+-            prop = m_name.c_str();
+-            break;
+-        case kpidIsDir:
+-            prop = false;
+-            break;
+-        case kpidIsAnti:
+-            prop = false;
+-            break;
+-        case kpidSize:
+-            prop = static_cast< UInt64 >( m_content.size() );
+-            break;
+-        case kpidAttrib:
+-            prop = static_cast< UInt32 >( FILE_ATTRIBUTE_NORMAL );
+-            break;
+-        case kpidCTime:
+-        case kpidATime:
+-        case kpidMTime:
+-            prop = m_time;
+-            break;
+-        default:
+-            break;
++    // Invoked by 7-Zip across a COM frame; no exception may escape.
++    try {
++        NWindows::NCOM::CPropVariant prop;
++        switch( propID ) {
++            case kpidPath:
++                prop = m_name.c_str();
++                break;
++            case kpidIsDir:
++                prop = false;
++                break;
++            case kpidIsAnti:
++                prop = false;
++                break;
++            case kpidSize:
++                prop = static_cast< UInt64 >( m_content.size() );
++                break;
++            case kpidAttrib:
++                prop = static_cast< UInt32 >( FILE_ATTRIBUTE_NORMAL );
++                break;
++            case kpidCTime:
++            case kpidATime:
++            case kpidMTime:
++                prop = m_time;
++                break;
++            default:
++                break;
++        }
++        prop.Detach( value );
++    }
++    catch( ... ) {
++        return E_OUTOFMEMORY;
+     }
+-    prop.Detach( value );
+     return S_OK;
+ }
+ 
+ Z7_COM7F_IMF(
+     UpdateCallback::GetStream( UInt32 index, ISequentialInStream** inStream ) )
+ {
+     if( inStream == nullptr ) {
+         return E_POINTER;
+     }
+     *inStream = nullptr;
+     if( index != 0 ) {
+         return E_INVALIDARG;
+     }
+     if( m_content.empty() ) {
+         return S_OK;  // 7-Zip expects a null stream for empty files
+     }
+ 
+-    CMyComPtr< ISequentialInStream > stream = new InMemStream( m_content );
+-    *inStream = stream.Detach();
++    // Invoked by 7-Zip across a COM frame; no exception may escape.
++    try {
++        CMyComPtr< ISequentialInStream > stream = new InMemStream( m_content );
++        *inStream = stream.Detach();
++    }
++    catch( ... ) {
++        return E_OUTOFMEMORY;
++    }
+     return S_OK;
+ }
+ 
+ Z7_COM7F_IMF( UpdateCallback::SetOperationResult( Int32 operationResult ) )
+ {
+     if( operationResult != NArchive::NUpdate::NOperationResult::kOK ) {
+         m_failed = true;
+     }
+     return S_OK;
+ }
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index d1c1d07..4c3d233 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -48,22 +48,23 @@ if(RCEDIT_ENABLE_ZSTD)
+     # cover ZstdCodecImpl::Decompress's streaming branch. rcedit_core links
+     # zstd::libzstd_static PRIVATE, so its usage requirements (include dirs)
+     # do not propagate here; link it directly for the test target too. This
+     # does not affect the "imports" check, which inspects rcedit.exe only.
+     find_package(zstd CONFIG REQUIRED)
+     target_link_libraries(rcedit_tests PRIVATE zstd::libzstd_static)
+ endif()
+ 
+ add_executable(rcedit_fixture fixture/fixture.c fixture/fixture.rc)
+ add_dependencies(rcedit_tests rcedit_fixture)
+-# MSVC's linker embeds a default manifest (RT_MANIFEST #1, lang 1033) unless
+-# suppressed; the fixture's baseline must contain only its RCDATA resource.
++# MSVC's linker embeds a default manifest (resource type RT_MANIFEST = 24,
++# name CREATEPROCESS_MANIFEST_RESOURCE_ID = 1, lang 1033) unless suppressed;
++# the fixture's baseline must contain only its RCDATA resource.
+ target_link_options(rcedit_fixture PRIVATE /MANIFEST:NO)
+ 
+ # One CTest per group. Later tasks append to RCEDIT_TEST_GROUPS.
+ set(RCEDIT_TEST_GROUPS version error encoding resource_id codec engine ops args commands)
+ if(RCEDIT_ENABLE_7Z)
+     list(APPEND RCEDIT_TEST_GROUPS sevenzip)
+ endif()
+ foreach(group IN LISTS RCEDIT_TEST_GROUPS)
+     add_test(NAME ${group} COMMAND rcedit_tests ${group} $<TARGET_FILE:rcedit_fixture>)
+ endforeach()
+diff --git a/tests/test_ops.cpp b/tests/test_ops.cpp
+index 9659712..240c169 100644
+--- a/tests/test_ops.cpp
++++ b/tests/test_ops.cpp
+@@ -1,20 +1,22 @@
+ //
+ // SPDX-License-Identifier: LGPL-2.1-or-later
+ //
+ // Copyright 2026 ANSSI. All Rights Reserved.
+ //
+ // Author(s): fabienfl (ANSSI)
+ //
+ #include "check.h"
+ #include "temp.h"
+ 
++#include <fstream>
++
+ #include <windows.h>
+ 
+ #include "core/codec.h"
+ #include "core/engine.h"
+ #include "core/error.h"
+ #include "core/ops.h"
+ 
+ namespace rcedit::test {
+ 
+ namespace {
+@@ -43,20 +45,33 @@ std::vector< uint8_t > Bytes( std::string_view s )
+ 
+ std::vector< uint8_t > Pattern( size_t size )
+ {
+     std::vector< uint8_t > v( size );
+     for( size_t i = 0; i < size; ++i ) {
+         v[ i ] = static_cast< uint8_t >( ( i * 13 ) % 251 );
+     }
+     return v;
+ }
+ 
++// Writes a file that is not a valid PE, so LoadLibraryExW (engine.Open)
++// deterministically fails on it -- used to force a failure after
++// CopyToOutput has already created 'output'.
++std::filesystem::path WriteNotAPe(
++    const TempDir& dir,
++    std::wstring_view fileName )
++{
++    const auto path = dir.Path() / fileName;
++    std::ofstream f( path, std::ios::binary );
++    f << "not a PE file";
++    return path;
++}
++
+ std::vector< ListEntry > ListAll( const std::filesystem::path& pe )
+ {
+     auto engine = MakeWin32Engine();
+     std::vector< ListEntry > entries;
+     CHECK_EC_OK( List( *engine, pe, ListOptions{}, entries ) );
+     return entries;
+ }
+ 
+ const ListEntry* Find(
+     const std::vector< ListEntry >& entries,
+@@ -161,20 +176,51 @@ void SetWithOutputLeavesSourceUnchanged()
+     const auto out = dir.Path() / L"b.exe";
+     auto engine = MakeWin32Engine();
+ 
+     CHECK_EC_OK(
+         Set( *engine, pe, kConfigNoLang, Bytes( "x" ), CodecId::None, out ) );
+ 
+     CHECK( ListAll( pe ).size() == 1 );
+     CHECK( ListAll( out ).size() == 2 );
+ }
+ 
++// A failure that strikes after CopyToOutput has already created 'output'
++// (here: engine.Open fails because 'pe' is not actually a valid PE, so the
++// copy at 'output' is garbage too) must not leave that stray file behind.
++void SetFailureAfterCopyRemovesOutput()
++{
++    TempDir dir;
++    const auto badPe = WriteNotAPe( dir, L"bad.exe" );
++    const auto out = dir.Path() / L"out.exe";
++    auto engine = MakeWin32Engine();
++
++    const auto ec =
++        Set( *engine, badPe, kConfigNoLang, Bytes( "x" ), CodecId::None, out );
++    CHECK( ec );
++    CHECK( !std::filesystem::exists( out ) );
++}
++
++// Same as above but for Remove: CopyToOutput succeeds (pe is a valid PE),
++// but ResolveLanguage then fails deterministically because CONFIG does not
++// exist in the fixture's baseline.
++void RemoveFailureAfterCopyRemovesOutput()
++{
++    TempDir dir;
++    const auto pe = CopyFixture( dir, L"a.exe" );
++    const auto out = dir.Path() / L"out.exe";
++    auto engine = MakeWin32Engine();
++
++    CHECK(
++        Remove( *engine, pe, kConfigNoLang, out ) == errc::resource_not_found );
++    CHECK( !std::filesystem::exists( out ) );
++}
++
+ void SetRefusesRunningExecutable()
+ {
+     wchar_t self[ MAX_PATH ];
+     ::GetModuleFileNameW( nullptr, self, MAX_PATH );
+     CHECK( IsRunningExecutable( self ) );
+ 
+     auto engine = MakeWin32Engine();
+     CHECK(
+         Set( *engine,
+              self,
+@@ -430,20 +476,23 @@ void HexdumpOfResource()
+     CHECK( text.starts_with( L"00000000  66 69 78 74 75 72 65" ) );
+ }
+ 
+ constexpr TestCase kCases[] = {
+     { "ListBaseline", ListBaseline },
+     { "ListFilters", ListFilters },
+     { "SetThenGetUncompressed", SetThenGetUncompressed },
+     { "SetEmptyFails", SetEmptyFails },
+     { "SetWithOutputLeavesSourceUnchanged",
+       SetWithOutputLeavesSourceUnchanged },
++    { "SetFailureAfterCopyRemovesOutput", SetFailureAfterCopyRemovesOutput },
++    { "RemoveFailureAfterCopyRemovesOutput",
++      RemoveFailureAfterCopyRemovesOutput },
+     { "SetRefusesRunningExecutable", SetRefusesRunningExecutable },
+ #if !defined( RCEDIT_HAS_ZSTD ) || !defined( RCEDIT_HAS_7Z )
+     { "SetErrorPrecedenceSelfUpdateBeforeCodecDisabled",
+       SetErrorPrecedenceSelfUpdateBeforeCodecDisabled },
+ #endif
+ #ifdef RCEDIT_HAS_ZSTD
+     { "ZstdRoundTrip", ZstdRoundTrip },
+ #else
+     { "ZstdDisabledOnSet", ZstdDisabledOnSet },
+     { "ZstdDisabledOnGet", ZstdDisabledOnGet },
