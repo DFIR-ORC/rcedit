@@ -126,10 +126,15 @@ The `rcedit` executable links with `/NODEFAULTLIB` and an explicit list:
 `libvcruntimed`). No user32, advapi32, version, shell32, or oleaut32.
 
 7-Zip and zstd are linked statically through the overlay port and the
-static triplet. If `7zip::extras` drags in `oleaut32` for `PropVariant`,
-the fix is to link only the extras objects the codec needs or to provide
-local `PropVariant` helpers, not to widen the allowlist. The import check
-test is the arbiter.
+static triplet. 7-Zip's Windows sources call `SysAllocString`,
+`SysFreeString`, and `VariantClear` for `BSTR` and `PROPVARIANT`
+handling, so a build with `RCEDIT_ENABLE_7Z` also links `oleaut32.lib`
+and `uuid.lib` and imports `OLEAUT32.dll`. OLEAUT32 is a KnownDLL: the
+loader maps it from `\KnownDlls` and never searches the application
+directory, so it cannot be side-loaded. The import allowlist is therefore
+`KERNEL32.dll` for every preset, plus `OLEAUT32.dll` only when 7z is
+enabled. Any other DLL, KnownDLL or not, fails the check; the fix is to
+patch the dependency out in the overlay port, not to widen the list.
 
 ## Core library
 
@@ -494,8 +499,9 @@ case, then:
 
 `tests/check_imports.cmake` runs `dumpbin /imports <exe>` (found via
 `CMAKE_LINKER` directory or `vswhere`), extracts every `.dll` line, and
-fails unless the set is a subset of `{KERNEL32.dll}`. Registered as CTest
-`imports` for the `rcedit` target and runs on every preset and
+fails unless the set is a subset of `{KERNEL32.dll}`, or of
+`{KERNEL32.dll, OLEAUT32.dll}` when `RCEDIT_ENABLE_7Z` is on. Registered
+as CTest `imports` for the `rcedit` target and runs on every preset and
 configuration, Debug included.
 
 ### CI
