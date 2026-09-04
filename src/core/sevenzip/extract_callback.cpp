@@ -35,6 +35,7 @@ Z7_COM7F_IMF(
     if( outStream == nullptr ) {
         return E_POINTER;
     }
+
     *outStream = nullptr;
 
     if( index != 0
@@ -64,6 +65,7 @@ Z7_COM7F_IMF( ExtractCallback::SetOperationResult( Int32 operationResult ) )
     if( operationResult != NArchive::NExtract::NOperationResult::kOK ) {
         m_failed = true;
     }
+
     return S_OK;
 }
 

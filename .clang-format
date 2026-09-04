@@ -149,6 +149,24 @@ UseTab:          Never
 #     *good*                   *bad*
 #     if( ! value )           if( !value )
 #
+# - control flow [if, else, for, while, switch, do]
+#     - always braces, even around a single statement
+#
+#     *good*                   *bad*
+#     if( ! value ) {          if( ! value )
+#         return;                  return;
+#     }
+#
+#     - empty line after the closing brace, unless it is followed by
+#     'else', 'catch' or the end of the enclosing block
+#
+#     *good*                   *bad*
+#     if( ! value ) {          if( ! value ) {
+#         return;                  return;
+#     }                        }
+#                              Process( value );
+#     Process( value );
+#
 #
 # - connect on multiple line
 # - break on stream operator [at least for log]

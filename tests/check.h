@@ -37,6 +37,7 @@ inline int RunGroup( std::string_view group, std::span< const TestCase > cases )
             std::print( "  -> FAILED\n" );
         }
     }
+
     std::print(
         "{}: {} case(s), {} failure(s)\n", group, cases.size(), g_failures );
     return g_failures == 0 ? 0 : 1;

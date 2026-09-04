@@ -23,9 +23,11 @@ Z7_COM7F_IMF(
     if( processedSize != nullptr ) {
         *processedSize = 0;
     }
+
     if( data == nullptr ) {
         return E_POINTER;
     }
+
     if( size == 0 || m_pos >= m_buffer.size() ) {
         return S_OK;
     }
@@ -37,6 +39,7 @@ Z7_COM7F_IMF(
     if( processedSize != nullptr ) {
         *processedSize = static_cast< UInt32 >( count );
     }
+
     return S_OK;
 }
 
@@ -54,6 +57,7 @@ Z7_COM7F_IMF(
     if( newPosition != nullptr ) {
         *newPosition = static_cast< UInt64 >( m_pos );
     }
+
     return S_OK;
 }
 

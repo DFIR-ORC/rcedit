@@ -37,9 +37,11 @@ CodecId DetectCodec( std::span< const uint8_t > data ) noexcept
     if( StartsWith( data, k7zMagic ) ) {
         return CodecId::SevenZip;
     }
+
     if( StartsWith( data, kZstdMagic ) ) {
         return CodecId::Zstd;
     }
+
     return CodecId::None;
 }
 
@@ -53,6 +55,7 @@ std::wstring_view CodecName( CodecId id ) noexcept
         case CodecId::None:
             break;
     }
+
     return L"none";
 }
 
@@ -65,6 +68,7 @@ std::expected< CodecId, std::error_code > ParseCodecName(
             return id;
         }
     }
+
     return std::unexpected( make_error_code( errc::unknown_codec ) );
 }
 
@@ -86,6 +90,7 @@ bool IsCodecAvailable( CodecId id ) noexcept
         case CodecId::None:
             break;
     }
+
     return false;
 }
 
@@ -107,6 +112,7 @@ std::expected< Codec*, std::error_code > FindCodec( CodecId id )
         case CodecId::None:
             break;
     }
+
     return std::unexpected(
         std::make_error_code( std::errc::invalid_argument ) );
 }
@@ -119,6 +125,7 @@ std::vector< std::wstring_view > AvailableCodecNames()
             names.push_back( CodecName( id ) );
         }
     }
+
     return names;
 }
 

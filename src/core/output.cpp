@@ -20,6 +20,7 @@ void Write( std::wstring_view text )
         std::fputs( "<unencodable output>", stdout );
         return;
     }
+
     std::fwrite( utf8->data(), 1, utf8->size(), stdout );
 }
 

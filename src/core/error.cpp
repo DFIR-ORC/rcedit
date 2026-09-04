@@ -42,6 +42,7 @@ public:
             case errc::empty_payload:
                 return "payload is empty";
         }
+
         return "unknown rcedit error";
     }
 };

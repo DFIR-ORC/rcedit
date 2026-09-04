@@ -27,6 +27,7 @@ std::vector< uint8_t > Pattern( size_t size )
     for( size_t i = 0; i < size; ++i ) {
         v[ i ] = static_cast< uint8_t >( ( i * 7 ) % 251 );
     }
+
     return v;
 }
 
@@ -149,6 +150,7 @@ void RejectsCorruptInput( Codec& codec )
     for( size_t i = 8; i < packed.size(); ++i ) {
         packed[ i ] = static_cast< uint8_t >( ~packed[ i ] );
     }
+
     std::vector< uint8_t > out;
     const auto ec = codec.Decompress( packed, out );
     CHECK( static_cast< bool >( ec ) );

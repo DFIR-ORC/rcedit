@@ -54,15 +54,18 @@ std::optional< uint16_t > ParseUnsigned( std::wstring_view digits, int base )
         else if( base == 16 && c >= L'A' && c <= L'F' ) {
             digit = 10 + ( c - L'A' );
         }
+
         if( digit < 0 || digit >= base ) {
             return std::nullopt;
         }
+
         value = value * static_cast< uint32_t >( base )
             + static_cast< uint32_t >( digit );
         if( value > 0xFFFF ) {
             return std::nullopt;
         }
     }
+
     return static_cast< uint16_t >( value );
 }
 
@@ -71,11 +74,13 @@ std::optional< uint16_t > AliasToId( std::wstring_view text )
     if( text.size() > 3 && EqualsIgnoreCase( text.substr( 0, 3 ), L"RT_" ) ) {
         text.remove_prefix( 3 );
     }
+
     for( const auto& alias : kAliases ) {
         if( EqualsIgnoreCase( alias.name, text ) ) {
             return alias.id;
         }
     }
+
     return std::nullopt;
 }
 
@@ -86,6 +91,7 @@ std::optional< std::wstring_view > IdToAlias( uint16_t id )
             return alias.name;
         }
     }
+
     return std::nullopt;
 }
 
@@ -104,6 +110,7 @@ std::expected< ResourceId, std::error_code > ParseResourceName(
             return std::unexpected(
                 make_error_code( errc::invalid_identifier ) );
         }
+
         return ResourceId( *id );
     }
 
@@ -116,6 +123,7 @@ std::expected< ResourceId, std::error_code > ParseResourceType(
     if( const auto id = AliasToId( text ) ) {
         return ResourceId( *id );
     }
+
     return ParseResourceName( text );
 }
 
@@ -133,6 +141,7 @@ std::expected< uint16_t, std::error_code > ParseLang( std::wstring_view text )
     if( !value ) {
         return std::unexpected( make_error_code( errc::invalid_language ) );
     }
+
     return *value;
 }
 
@@ -141,6 +150,7 @@ std::wstring FormatResourceName( const ResourceId& id )
     if( const auto* n = std::get_if< uint16_t >( &id ) ) {
         return std::format( L"#{}", *n );
     }
+
     return std::get< std::wstring >( id );
 }
 
@@ -150,8 +160,10 @@ std::wstring FormatResourceType( const ResourceId& id )
         if( const auto alias = IdToAlias( *n ) ) {
             return std::format( L"RT_{}", *alias );
         }
+
         return std::format( L"#{}", *n );
     }
+
     return std::get< std::wstring >( id );
 }
 
@@ -160,6 +172,7 @@ const wchar_t* ToLpcwstr( const ResourceId& id ) noexcept
     if( const auto* n = std::get_if< uint16_t >( &id ) ) {
         return MAKEINTRESOURCEW( *n );
     }
+
     return std::get< std::wstring >( id ).c_str();
 }
 
@@ -170,6 +183,7 @@ ResourceId FromLpcwstr( const wchar_t* value )
             static_cast< uint16_t >(
                 reinterpret_cast< uintptr_t >( value ) & 0xFFFF ) );
     }
+
     return ResourceId( std::wstring( value ) );
 }
 

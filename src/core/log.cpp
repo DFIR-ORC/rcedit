@@ -30,6 +30,7 @@ constexpr char Tag( Level level )
         case Level::Error:
             return 'E';
     }
+
     return '?';
 }
 

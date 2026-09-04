@@ -129,6 +129,7 @@ std::error_code SevenZipCodecImpl::Compress(
         output.clear();
         return HResultError( hr );
     }
+
     if( callbackImpl->Failed() ) {
         output.clear();
         return std::make_error_code( std::errc::io_error );
@@ -152,6 +153,7 @@ std::optional< uint64_t > SevenZipCodecImpl::ContentSize(
     if( FAILED( hr ) || prop.vt != VT_UI8 ) {
         return std::nullopt;
     }
+
     return static_cast< uint64_t >( prop.uhVal.QuadPart );
 }
 
@@ -183,6 +185,7 @@ std::error_code SevenZipCodecImpl::Decompress(
             FormatError( HResultError( hr ) ) );
         return make_error_code( errc::corrupt_payload );
     }
+
     if( callbackImpl->Failed() ) {
         return make_error_code( errc::corrupt_payload );
     }

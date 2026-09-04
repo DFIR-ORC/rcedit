@@ -112,6 +112,7 @@ void FormatRoundTrips()
         CHECK( id.has_value() );
         CHECK( FormatResourceName( *id ) == s );
     }
+
     for( const wchar_t* s :
          { L"RT_ICON", L"RT_VERSION", L"#200", L"MYTYPE" } ) {
         auto id = ParseResourceType( s );

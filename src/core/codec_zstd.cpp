@@ -57,6 +57,7 @@ std::error_code ZstdCodecImpl::Compress(
             ZstdErrorName( levelResult ) );
         return std::make_error_code( std::errc::invalid_argument );
     }
+
     // R14: rcedit produces every frame it later reads back (payloads round-trip
     // through this codec only), so the checksum is pure defense-in-depth: it
     // catches accidental corruption in transit/storage and is verified
@@ -102,6 +103,7 @@ std::optional< uint64_t > ZstdCodecImpl::ContentSize(
     if( size == ZSTD_CONTENTSIZE_ERROR || size == ZSTD_CONTENTSIZE_UNKNOWN ) {
         return std::nullopt;
     }
+
     return static_cast< uint64_t >( size );
 }
 
@@ -139,6 +141,7 @@ std::error_code ZstdCodecImpl::Decompress(
                 L"Failed ZSTD_decompressDCtx [{}]", ZstdErrorName( actual ) );
             return make_error_code( errc::corrupt_payload );
         }
+
         result.resize( actual );
         output = std::move( result );
         return {};
@@ -164,6 +167,7 @@ std::error_code ZstdCodecImpl::Decompress(
                 L"Failed ZSTD_decompressStream [{}]", ZstdErrorName( rc ) );
             return make_error_code( errc::corrupt_payload );
         }
+
         try {
             result.insert(
                 result.end(),
@@ -177,6 +181,7 @@ std::error_code ZstdCodecImpl::Decompress(
             break;
         }
     }
+
     if( rc != 0 ) {
         Log::Debug( L"Truncated zstd frame: input exhausted before frame end" );
         return make_error_code( errc::corrupt_payload );

@@ -40,12 +40,15 @@ Z7_COM7F_IMF(
     if( newData != nullptr ) {
         *newData = 1;
     }
+
     if( newProperties != nullptr ) {
         *newProperties = 1;
     }
+
     if( indexInArchive != nullptr ) {
         *indexInArchive = static_cast< UInt32 >( -1 );
     }
+
     return S_OK;
 }
 
@@ -101,10 +104,12 @@ Z7_COM7F_IMF(
     if( inStream == nullptr ) {
         return E_POINTER;
     }
+
     *inStream = nullptr;
     if( index != 0 ) {
         return E_INVALIDARG;
     }
+
     if( m_content.empty() ) {
         return S_OK;  // 7-Zip expects a null stream for empty files
     }
@@ -125,6 +130,7 @@ Z7_COM7F_IMF( UpdateCallback::SetOperationResult( Int32 operationResult ) )
     if( operationResult != NArchive::NUpdate::NOperationResult::kOK ) {
         m_failed = true;
     }
+
     return S_OK;
 }
 
