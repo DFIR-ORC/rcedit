@@ -47,6 +47,12 @@ rcedit remove app.exe -t RT_RCDATA -n CONFIG -o app-without-config.exe
 
 Exit codes: 0 success, 1 the command failed, 2 usage error.
 
+A resource update invalidates the PE checksum of the file it modifies. `set`
+and `remove` clear `OptionalHeader.CheckSum` instead of recomputing it, so the
+image is left with no checksum, which the loader accepts for anything but a
+driver or a boot-time DLL. Run `editbin /release` on the result if a valid
+checksum is required.
+
 ## Build
 
 Requirements: Visual Studio 2022 (MSVC with C++23), CMake 3.25+, Ninja. Run

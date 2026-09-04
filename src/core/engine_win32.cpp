@@ -119,6 +119,161 @@ BOOL CALLBACK OnType( HMODULE module, LPWSTR type, LONG_PTR param )
     }
 }
 
+// Offset of OptionalHeader.CheckSum from the start of the NT headers. The
+// same in PE32 and PE32+: every field before it sits at the same place in
+// both optional headers, ImageBase's four extra bytes making up for the
+// BaseOfData that PE32+ does not have.
+constexpr LONGLONG kCheckSumOffset =
+    offsetof( IMAGE_NT_HEADERS32, OptionalHeader.CheckSum );
+static_assert(
+    kCheckSumOffset == offsetof( IMAGE_NT_HEADERS64, OptionalHeader.CheckSum ),
+    "PE32 and PE32+ must agree on where the checksum sits" );
+
+// Smallest optional header that still holds a checksum.
+constexpr WORD kMinOptionalHeaderSize =
+    offsetof( IMAGE_OPTIONAL_HEADER32, CheckSum ) + sizeof( DWORD );
+
+std::error_code ReadAt( HANDLE file, LONGLONG offset, void* buffer, DWORD size )
+{
+    LARGE_INTEGER position;
+    position.QuadPart = offset;
+    if( !::SetFilePointerEx( file, position, nullptr, FILE_BEGIN ) ) {
+        return LastWin32Error();
+    }
+
+    DWORD read = 0;
+    if( !::ReadFile( file, buffer, size, &read, nullptr ) ) {
+        return LastWin32Error();
+    }
+
+    // Short of the requested bytes means the headers run past the end of the
+    // file, which is not a PE this code can reason about.
+    return read == size ? std::error_code{}
+                        : Win32Error( ERROR_BAD_EXE_FORMAT );
+}
+
+std::error_code WriteAt(
+    HANDLE file,
+    LONGLONG offset,
+    const void* buffer,
+    DWORD size )
+{
+    LARGE_INTEGER position;
+    position.QuadPart = offset;
+    if( !::SetFilePointerEx( file, position, nullptr, FILE_BEGIN ) ) {
+        return LastWin32Error();
+    }
+
+    DWORD written = 0;
+    if( !::WriteFile( file, buffer, size, &written, nullptr ) ) {
+        return LastWin32Error();
+    }
+
+    return written == size ? std::error_code{}
+                           : Win32Error( ERROR_WRITE_FAULT );
+}
+
+// Walks the DOS and file headers to locate OptionalHeader.CheckSum, filling
+// its file offset and current value. Anything that does not parse as a PE is
+// ERROR_BAD_EXE_FORMAT.
+std::error_code FindCheckSum( HANDLE file, LONGLONG& offset, DWORD& value )
+{
+    IMAGE_DOS_HEADER dos = {};
+    if( const auto ec = ReadAt( file, 0, &dos, sizeof( dos ) ) ) {
+        return ec;
+    }
+
+    if( dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < 0 ) {
+        return Win32Error( ERROR_BAD_EXE_FORMAT );
+    }
+
+    DWORD signature = 0;
+    if( const auto ec =
+            ReadAt( file, dos.e_lfanew, &signature, sizeof( signature ) ) ) {
+        return ec;
+    }
+
+    if( signature != IMAGE_NT_SIGNATURE ) {
+        return Win32Error( ERROR_BAD_EXE_FORMAT );
+    }
+
+    IMAGE_FILE_HEADER header = {};
+    if( const auto ec = ReadAt(
+            file,
+            dos.e_lfanew + sizeof( signature ),
+            &header,
+            sizeof( header ) ) ) {
+        return ec;
+    }
+
+    // An object file or a stripped image can carry an optional header too
+    // short to reach the checksum; there is then nothing to clear.
+    if( header.SizeOfOptionalHeader < kMinOptionalHeaderSize ) {
+        return Win32Error( ERROR_BAD_EXE_FORMAT );
+    }
+
+    const LONGLONG at = dos.e_lfanew + kCheckSumOffset;
+    DWORD checksum = 0;
+    if( const auto ec = ReadAt( file, at, &checksum, sizeof( checksum ) ) ) {
+        return ec;
+    }
+
+    offset = at;
+    value = checksum;
+    return {};
+}
+
+// Zeroes OptionalHeader.CheckSum when the image carries one, a no-op when it
+// does not. EndUpdateResourceW rewrites the resource directory and shifts
+// what follows it without touching the checksum, so the value left in the
+// header no longer matches the bytes on disk; zero is what a linker writes
+// when it computes none, and what the loader accepts for anything that is
+// not a driver or a boot-time DLL.
+//
+// TODO: recompute the checksum rather than clear it, for the images that do
+// need a valid one. The algorithm is a 16-bit ones' complement sum over the
+// whole file plus its size, with the checksum field itself read as zero;
+// imagehlp's CheckSumMappedFile does it but would add a DLL outside the
+// import allowlist, so it has to be written here.
+std::error_code ClearCheckSum( const std::filesystem::path& path )
+{
+    FileHandle file(
+        ::CreateFileW(
+            path.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr ) );
+    if( !file ) {
+        return LastWin32Error();
+    }
+
+    LONGLONG offset = 0;
+    DWORD checksum = 0;
+    if( const auto ec = FindCheckSum( file.get(), offset, checksum ) ) {
+        return ec;
+    }
+
+    if( checksum == 0 ) {
+        return {};
+    }
+
+    constexpr DWORD kNoCheckSum = 0;
+    if( const auto ec = WriteAt(
+            file.get(), offset, &kNoCheckSum, sizeof( kNoCheckSum ) ) ) {
+        return ec;
+    }
+
+    Log::Debug(
+        L"Cleared the stale PE checksum 0x{:08X} of '{}', a new one is not "
+        L"computed",
+        checksum,
+        path.wstring() );
+    return {};
+}
+
 struct LangMatchContext
 {
     WORD wanted = 0;
@@ -323,6 +478,20 @@ public:
             const auto ec = LastWin32Error();
             Log::Debug( L"Failed EndUpdateResourceW [{}]", FormatError( ec ) );
             return ec;
+        }
+
+        // Best effort: the resources are already written, and a stale
+        // checksum is exactly what the caller would have been left with
+        // before this step existed, so a failure warns instead of failing
+        // the commit. Reporting it would also feed the contention retry in
+        // ops.cpp, which replays the whole sequence -- for Remove, against a
+        // resource that is already gone.
+        if( const auto ec = ClearCheckSum( m_path ) ) {
+            Log::Warn(
+                L"Failed to clear the PE checksum of '{}', it is now stale "
+                L"[{}]",
+                m_path.wstring(),
+                FormatError( ec ) );
         }
 
         return {};

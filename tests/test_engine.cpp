@@ -8,6 +8,8 @@
 #include "check.h"
 #include "temp.h"
 
+#include <fstream>
+
 #include "core/engine.h"
 #include "core/error.h"
 
@@ -48,6 +50,41 @@ bool Contains(
     }
 
     return false;
+}
+
+// File offset of OptionalHeader.CheckSum, walked from the DOS header with
+// plain arithmetic rather than with the IMAGE_* structs, so the test does not
+// restate the engine's own computation: e_lfanew at 0x3C, then 4 bytes of
+// "PE\0\0", 20 bytes of IMAGE_FILE_HEADER and 64 bytes into the optional
+// header (the same in PE32 and PE32+).
+std::streamoff CheckSumOffset( const std::filesystem::path& pe )
+{
+    std::ifstream file( pe, std::ios::binary );
+    file.seekg( 0x3C );
+    int32_t lfanew = 0;
+    file.read( reinterpret_cast< char* >( &lfanew ), sizeof( lfanew ) );
+    CHECK( file.good() );
+    return static_cast< std::streamoff >( lfanew ) + 4 + 20 + 64;
+}
+
+uint32_t ReadCheckSum( const std::filesystem::path& pe )
+{
+    std::ifstream file( pe, std::ios::binary );
+    file.seekg( CheckSumOffset( pe ) );
+    uint32_t checksum = 0;
+    file.read( reinterpret_cast< char* >( &checksum ), sizeof( checksum ) );
+    CHECK( file.good() );
+    return checksum;
+}
+
+void WriteCheckSum( const std::filesystem::path& pe, uint32_t checksum )
+{
+    const auto offset = CheckSumOffset( pe );
+    std::ofstream file( pe, std::ios::binary | std::ios::in );
+    file.seekp( offset );
+    file.write(
+        reinterpret_cast< const char* >( &checksum ), sizeof( checksum ) );
+    CHECK( file.good() );
 }
 
 void OpenMissingFileFails()
@@ -227,6 +264,56 @@ void DestructorWithoutCommitDiscards()
     CHECK( entries.size() == 1 );
 }
 
+void CommitClearsCheckSum()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    WriteCheckSum( pe, 0xDEADBEEF );
+
+    auto engine = MakeWin32Engine();
+    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
+    CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
+    CHECK_EC_OK( engine->Commit() );
+
+    // The update leaves the old checksum stale; it must be zeroed, not
+    // recomputed.
+    CHECK( ReadCheckSum( pe ) == 0 );
+    CHECK( Contains(
+        EnumerateOf( pe ),
+        kConfig,
+        static_cast< uint32_t >( kConfigBytes.size() ) ) );
+}
+
+void CommitOnZeroCheckSumKeepsIt()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    WriteCheckSum( pe, 0 );
+
+    auto engine = MakeWin32Engine();
+    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
+    CHECK_EC_OK( engine->Remove( kBaseline ) );
+    CHECK_EC_OK( engine->Commit() );
+
+    CHECK( ReadCheckSum( pe ) == 0 );
+    CHECK( EnumerateOf( pe ).empty() );
+}
+
+void DiscardLeavesCheckSum()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    WriteCheckSum( pe, 0xDEADBEEF );
+
+    auto engine = MakeWin32Engine();
+    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
+    CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
+    engine->Discard();
+
+    // Nothing was written to the file, so its checksum still matches.
+    CHECK( ReadCheckSum( pe ) == 0xDEADBEEF );
+}
+
 constexpr TestCase kCases[] = {
     { "OpenMissingFileFails", OpenMissingFileFails },
     { "EnumerateBaseline", EnumerateBaseline },
@@ -241,6 +328,9 @@ constexpr TestCase kCases[] = {
     { "ReadAfterWriteIsNotPermitted", ReadAfterWriteIsNotPermitted },
     { "DiscardLeavesFileUnchanged", DiscardLeavesFileUnchanged },
     { "DestructorWithoutCommitDiscards", DestructorWithoutCommitDiscards },
+    { "CommitClearsCheckSum", CommitClearsCheckSum },
+    { "CommitOnZeroCheckSumKeepsIt", CommitOnZeroCheckSumKeepsIt },
+    { "DiscardLeavesCheckSum", DiscardLeavesCheckSum },
 };
 
 }  // namespace
