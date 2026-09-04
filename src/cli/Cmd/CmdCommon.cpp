@@ -175,7 +175,8 @@ void PrintConfirmation(
         return;
     }
 
-    // Widest label in use ("Stored"), so every command's rows line up.
+    // Widest label in use ("Stored", "Source"), so every command's rows line
+    // up.
     constexpr int kLabelWidth = 6;
 
     Out::Print( L"{}\n", header );

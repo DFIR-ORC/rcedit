@@ -7,6 +7,7 @@
 //
 #include "cli/Cmd/CmdSet.h"
 
+#include <algorithm>
 #include <format>
 
 #include "cli/Cmd/CmdCommon.h"
@@ -67,6 +68,30 @@ const OptionSpec kSetOptions[] = {
       L"Write to a copy of <pe_file> at FILE instead of in place" },
 };
 
+// Longest value echoed back in the confirmation. The row is a reminder of what
+// was stored, not the payload itself.
+constexpr size_t kMaxValueChars = 60;
+
+// The value as one quoted row. A cut value keeps its full length so the row
+// stays honest about what was stored.
+std::wstring FormatValue( std::wstring_view text )
+{
+    const size_t shown = std::min( text.size(), kMaxValueChars );
+
+    std::wstring out;
+    out.reserve( shown );
+    for( const wchar_t c : text.substr( 0, shown ) ) {
+        // A control character would break the one row per field layout.
+        out += ( c >= 0x20 && c != 0x7F ) ? c : L'.';
+    }
+
+    if( shown == text.size() ) {
+        return std::format( L"'{}'", out );
+    }
+
+    return std::format( L"'{}...' ({} characters)", out, text.size() );
+}
+
 std::optional< std::wstring > ValidateSet( const ParsedArgs& args )
 {
     if( auto key = ParseKey( args, true ); !key ) {
@@ -104,8 +129,10 @@ std::error_code HandleSet( const ParsedArgs& args )
         return std::make_error_code( std::errc::invalid_argument );
     }
 
-    // Prepare data
+    // Prepare data, keeping what it came from for the confirmation: the text
+    // itself for a value, the file it was read from for a path.
     std::vector< uint8_t > data;
+    ConfirmationField source;
     if( const auto value = args.Value( L"value" ) ) {
         const auto utf8 = Utf16ToUtf8( *value );
         if( !utf8 ) {
@@ -116,11 +143,13 @@ std::error_code HandleSet( const ParsedArgs& args )
         }
 
         data.assign( utf8->begin(), utf8->end() );
+        source = { L"Value", FormatValue( *value ) };
     }
     else if( const auto value16 = args.Value( L"value-utf16" ) ) {
         const auto* bytes =
             reinterpret_cast< const uint8_t* >( value16->data() );
         data.assign( bytes, bytes + value16->size() * sizeof( wchar_t ) );
+        source = { L"Value", FormatValue( *value16 ) };
     }
     else if( const auto valuePath = args.Value( L"value-path" ) ) {
         const fs::path path{ std::wstring( *valuePath ) };
@@ -134,6 +163,7 @@ std::error_code HandleSet( const ParsedArgs& args )
         }
 
         data = std::move( *content );
+        source = { L"Source", std::format( L"'{}'", path.wstring() ) };
     }
     else {
         Log::Error( L"No input provided for 'set'" );
@@ -170,6 +200,8 @@ std::error_code HandleSet( const ParsedArgs& args )
                   result.storedSize,
                   CodecName( result.codec ) ) } );
     }
+
+    fields.push_back( std::move( source ) );
 
     PrintConfirmation(
         std::format(
