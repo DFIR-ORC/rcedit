@@ -39,5 +39,8 @@ Ask which one, then start at Task 1. Do not skip the failing-test steps.
 
 ## Open items after the plan is done
 
+The two future-work items below now live in `docs/BACKLOG.md`, with the rest of
+the backlog. Look there, not here.
+
 - Push to GitHub to validate `.github/workflows/build.yml` (cannot be verified locally).
 - Future work noted in the spec, not to implement now: portable PE engine (Linux), manifest editing, JSON output for `list`.

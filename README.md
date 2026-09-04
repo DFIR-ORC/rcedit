@@ -83,6 +83,8 @@ See `docs/superpowers/specs/2026-09-03-rcedit-v2-design.md`. The Win32
 resource API sits behind a `ResourceEngine` interface so a portable PE
 engine can be added later.
 
+Planned work, and the known gaps behind it, are in `docs/BACKLOG.md`.
+
 ## License
 
 LGPL-2.1-or-later. Copyright ANSSI.
