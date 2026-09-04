@@ -516,6 +516,113 @@ void RemoveWithOutput()
     CHECK( ListAll( out ).empty() );
 }
 
+void SetReportsResult()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    auto engine = MakeWin32Engine();
+
+    SetResult result{};
+    CHECK_EC_OK(
+        Set( *engine,
+             pe,
+             kConfigNoLang,
+             Bytes( "abc" ),
+             CodecId::None,
+             std::nullopt,
+             &result ) );
+
+    CHECK( result.lang == 0 );
+    CHECK( result.inputSize == 3 );
+    CHECK( result.storedSize == 3 );
+    CHECK( result.codec == CodecId::None );
+}
+
+void RemoveReportsResolvedLanguage()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    auto engine = MakeWin32Engine();
+
+    CHECK_EC_OK( Set(
+        *engine, pe, kConfigFr, Bytes( "fr" ), CodecId::None, std::nullopt ) );
+
+    RemoveResult result{};
+    CHECK_EC_OK( Remove( *engine, pe, kConfigNoLang, std::nullopt, &result ) );
+    CHECK( result.lang == 1036 );
+}
+
+void GetReportsStoredSize()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    auto engine = MakeWin32Engine();
+
+    CHECK_EC_OK(
+        Set( *engine,
+             pe,
+             kConfigEn,
+             Bytes( "abcd" ),
+             CodecId::None,
+             std::nullopt ) );
+
+    std::vector< uint8_t > out;
+    GetResult result{};
+    CHECK_EC_OK( Get( *engine, pe, kConfigNoLang, false, out, &result ) );
+
+    CHECK( result.lang == 1033 );
+    CHECK( result.storedSize == 4 );
+    CHECK( result.codec == CodecId::None );
+}
+
+#if defined( RCEDIT_HAS_ZSTD ) || defined( RCEDIT_HAS_7Z )
+// Set reports what it actually stored and Get reports what it actually read,
+// so a compressed payload shows both the packed and the original size.
+void CompressedResultsReportCodec( CodecId codec )
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    auto engine = MakeWin32Engine();
+    const auto payload = Pattern( 50000 );
+
+    SetResult setResult{};
+    CHECK_EC_OK(
+        Set( *engine,
+             pe,
+             kConfigNoLang,
+             payload,
+             codec,
+             std::nullopt,
+             &setResult ) );
+
+    CHECK( setResult.codec == codec );
+    CHECK( setResult.inputSize == payload.size() );
+    CHECK( setResult.storedSize < payload.size() );
+
+    std::vector< uint8_t > out;
+    GetResult getResult{};
+    CHECK_EC_OK( Get( *engine, pe, kConfigNoLang, false, out, &getResult ) );
+
+    CHECK( getResult.codec == codec );
+    CHECK( getResult.storedSize == setResult.storedSize );
+    CHECK( out.size() == payload.size() );
+}
+#endif
+
+#ifdef RCEDIT_HAS_ZSTD
+void ZstdResultsReportCodec()
+{
+    CompressedResultsReportCodec( CodecId::Zstd );
+}
+#endif
+
+#ifdef RCEDIT_HAS_7Z
+void SevenZipResultsReportCodec()
+{
+    CompressedResultsReportCodec( CodecId::SevenZip );
+}
+#endif
+
 void HexdumpFormatting()
 {
     const auto data = Bytes( "fixture" );
@@ -585,6 +692,15 @@ constexpr TestCase kCases[] = {
     { "LanguageResolution", LanguageResolution },
     { "RemoveResolvesLanguage", RemoveResolvesLanguage },
     { "RemoveWithOutput", RemoveWithOutput },
+    { "SetReportsResult", SetReportsResult },
+    { "RemoveReportsResolvedLanguage", RemoveReportsResolvedLanguage },
+    { "GetReportsStoredSize", GetReportsStoredSize },
+#ifdef RCEDIT_HAS_ZSTD
+    { "ZstdResultsReportCodec", ZstdResultsReportCodec },
+#endif
+#ifdef RCEDIT_HAS_7Z
+    { "SevenZipResultsReportCodec", SevenZipResultsReportCodec },
+#endif
     { "HexdumpFormatting", HexdumpFormatting },
     { "HexdumpOfResource", HexdumpOfResource },
 };

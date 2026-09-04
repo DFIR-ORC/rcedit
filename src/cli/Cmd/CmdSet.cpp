@@ -141,19 +141,41 @@ std::error_code HandleSet( const ParsedArgs& args )
     }
 
     auto engine = MakeWin32Engine();
-    if( const auto ec = Set(
-            *engine, args.pePath, *key, data, *codec, OutputPath( args ) ) ) {
+    const auto output = OutputPath( args );
+    SetResult result;
+    if( const auto ec =
+            Set( *engine, args.pePath, *key, data, *codec, output, &result ) ) {
         return Report( ec, args.pePath, *key );
     }
 
-    Log::Info(
-        L"Set {}/{} ({} bytes{})",
-        FormatResourceType( key->type ),
-        FormatResourceName( key->name ),
-        data.size(),
-        *codec == CodecId::None
-            ? L""
-            : std::format( L", {} compressed", CodecName( *codec ) ) );
+    std::vector< ConfirmationField > fields = {
+        { L"Type", FormatTypeVerbose( key->type ) },
+        { L"Name", FormatResourceName( key->name ) },
+        { L"Lang", FormatLang( result.lang ) },
+    };
+
+    // Uncompressed, the payload and what landed in the PE are the same number,
+    // so one row says it; compressed, both are worth seeing.
+    if( result.codec == CodecId::None ) {
+        fields.push_back(
+            { L"Size", std::format( L"{} bytes", result.storedSize ) } );
+    }
+    else {
+        fields.push_back(
+            { L"Input", std::format( L"{} bytes", result.inputSize ) } );
+        fields.push_back(
+            { L"Stored",
+              std::format(
+                  L"{} bytes ({})",
+                  result.storedSize,
+                  CodecName( result.codec ) ) } );
+    }
+
+    PrintConfirmation(
+        std::format(
+            L"Set resource in '{}'",
+            ( output ? *output : args.pePath ).wstring() ),
+        fields );
     return {};
 }
 

@@ -301,7 +301,8 @@ std::error_code Get(
     const fs::path& pe,
     const ResourceKey& key,
     bool raw,
-    std::vector< uint8_t >& out )
+    std::vector< uint8_t >& out,
+    GetResult* result )
 {
     ResourceKey resolved;
     std::vector< uint8_t > stored;
@@ -309,8 +310,18 @@ std::error_code Get(
         return ec;
     }
 
+    // Both are read before MaybeDecompress swaps in the unpacked payload: the
+    // stored size is otherwise lost, and under 'raw' the detected codec is the
+    // only sign that what the caller gets back is still compressed.
+    const auto storedSize = static_cast< uint64_t >( stored.size() );
+    const auto detected = DetectCodec( stored );
+
     if( const auto ec = MaybeDecompress( stored, raw ) ) {
         return ec;
+    }
+
+    if( result ) {
+        *result = GetResult{ *resolved.lang, storedSize, detected };
     }
 
     out = std::move( stored );
@@ -323,7 +334,8 @@ std::error_code Set(
     const ResourceKey& key,
     std::span< const uint8_t > data,
     CodecId codecId,
-    const std::optional< fs::path >& output )
+    const std::optional< fs::path >& output,
+    SetResult* result )
 {
     if( data.empty() ) {
         return make_error_code( errc::empty_payload );
@@ -373,6 +385,14 @@ std::error_code Set(
 
     if( ec ) {
         RemoveStrayOutput( output );
+        return ec;
+    }
+
+    if( result ) {
+        *result = SetResult{ *resolved.lang,
+                             static_cast< uint64_t >( data.size() ),
+                             static_cast< uint64_t >( payload.size() ),
+                             codecId };
     }
 
     return ec;
@@ -382,7 +402,8 @@ std::error_code Remove(
     ResourceEngine& engine,
     const fs::path& pe,
     const ResourceKey& key,
-    const std::optional< fs::path >& output )
+    const std::optional< fs::path >& output,
+    RemoveResult* result )
 {
     fs::path target;
     if( const auto ec = SelectTarget( pe, output, target ) ) {
@@ -392,6 +413,10 @@ std::error_code Remove(
     if( const auto ec = CopyToOutput( pe, output ) ) {
         return ec;
     }
+
+    // Set by whichever attempt resolves the language; only read once the whole
+    // sequence has succeeded, so a retried attempt overwriting it is harmless.
+    uint16_t removedLang = 0;
 
     const auto ec = RetryOnContention( [ & ]() -> std::error_code {
         if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
@@ -410,6 +435,8 @@ std::error_code Remove(
             return ec;
         }
 
+        removedLang = *resolved.lang;
+
         if( const auto ec = engine.Remove( resolved ) ) {
             engine.Discard();
             return ec;
@@ -420,6 +447,11 @@ std::error_code Remove(
 
     if( ec ) {
         RemoveStrayOutput( output );
+        return ec;
+    }
+
+    if( result ) {
+        *result = RemoveResult{ removedLang };
     }
 
     return ec;

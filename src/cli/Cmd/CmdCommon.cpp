@@ -18,6 +18,7 @@
 #include "core/format.h"
 #include "core/log.h"
 #include "core/ops.h"
+#include "core/output.h"
 
 namespace rcedit::cli {
 
@@ -161,6 +162,49 @@ std::error_code WriteFile(
     }
 
     return {};
+}
+
+void PrintConfirmation(
+    std::wstring_view header,
+    std::span< const ConfirmationField > fields )
+{
+    // --quiet reaches here as Level::Error (see cli/main.cpp). Only the
+    // confirmation is gated: Out::Write keeps working, so 'list' and 'hexdump'
+    // still produce the data they were asked for.
+    if( Log::GetLevel() > Log::Level::Info ) {
+        return;
+    }
+
+    // Widest label in use ("Stored"), so every command's rows line up.
+    constexpr int kLabelWidth = 6;
+
+    Out::Print( L"{}\n", header );
+    for( const auto& field : fields ) {
+        Out::Print( L"  {:<{}}  {}\n", field.label, kLabelWidth, field.value );
+    }
+}
+
+std::wstring FormatTypeVerbose( const ResourceId& type )
+{
+    auto text = FormatResourceType( type );
+
+    // An alias hides the number the resource is actually stored under, which
+    // is what a reader needs to address it again.
+    if( const auto* id = std::get_if< uint16_t >( &type );
+        id && text.starts_with( L"RT_" ) ) {
+        text += std::format( L" (#{})", *id );
+    }
+
+    return text;
+}
+
+std::wstring FormatLang( uint16_t lang )
+{
+    if( lang == 0 ) {
+        return L"0 (neutral)";
+    }
+
+    return std::format( L"{}", lang );
 }
 
 std::error_code Report(

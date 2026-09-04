@@ -42,9 +42,11 @@ std::error_code HandleGet( const ParsedArgs& args )
     }
 
     auto engine = MakeWin32Engine();
+    const bool raw = args.Has( L"raw" );
     std::vector< uint8_t > data;
+    GetResult result;
     if( const auto ec =
-            Get( *engine, args.pePath, *key, args.Has( L"raw" ), data ) ) {
+            Get( *engine, args.pePath, *key, raw, data, &result ) ) {
         return Report( ec, args.pePath, *key );
     }
 
@@ -56,7 +58,30 @@ std::error_code HandleGet( const ParsedArgs& args )
         return ec;
     }
 
-    Log::Info( L"Wrote {} bytes to '{}'", data.size(), outputPath->wstring() );
+    const ConfirmationField fields[] = {
+        { L"Type", FormatTypeVerbose( key->type ) },
+        { L"Name", FormatResourceName( key->name ) },
+        { L"Lang", FormatLang( result.lang ) },
+        { L"Stored",
+          result.codec == CodecId::None
+              ? std::format( L"{} bytes", result.storedSize )
+              : std::format(
+                    L"{} bytes ({})",
+                    result.storedSize,
+                    CodecName( result.codec ) ) },
+        // Under --raw the compressed payload is what reaches the file, so the
+        // Stored row above is not the size of what was written.
+        { L"Wrote",
+          std::format(
+              L"{} bytes to '{}'{}",
+              data.size(),
+              outputPath->wstring(),
+              raw ? L" (raw)" : L"" ) },
+    };
+
+    PrintConfirmation(
+        std::format( L"Extracted resource from '{}'", args.pePath.wstring() ),
+        fields );
     return {};
 }
 

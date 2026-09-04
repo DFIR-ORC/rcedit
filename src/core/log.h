@@ -37,15 +37,6 @@ void Debug( std::wformat_string< Args... > fmt, Args&&... args )
 }
 
 template < typename... Args >
-void Info( std::wformat_string< Args... > fmt, Args&&... args )
-{
-    if( GetLevel() <= Level::Info ) {
-        Write(
-            Level::Info, std::format( fmt, std::forward< Args >( args )... ) );
-    }
-}
-
-template < typename... Args >
 void Warn( std::wformat_string< Args... > fmt, Args&&... args )
 {
     if( GetLevel() <= Level::Warn ) {

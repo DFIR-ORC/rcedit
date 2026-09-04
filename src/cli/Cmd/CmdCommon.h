@@ -66,6 +66,28 @@ inline constexpr OptionSpec kRaw = {
     const std::filesystem::path& path,
     std::span< const uint8_t > data );
 
+// ---- success reporting ------------------------------------------------------
+
+struct ConfirmationField
+{
+    std::wstring_view label;
+    std::wstring value;
+};
+
+// Reports what a command did on stdout: a header line naming the file it
+// touched, then one indented "label  value" row per field. Silent under
+// --quiet. Diagnostics belong in Log; this is the command's result.
+void PrintConfirmation(
+    std::wstring_view header,
+    std::span< const ConfirmationField > fields );
+
+// Like FormatResourceType, but keeps the numeric id visible behind a known
+// alias: "RT_RCDATA (#10)", "#42", "MYTYPE".
+[[nodiscard]] std::wstring FormatTypeVerbose( const ResourceId& type );
+
+// "0 (neutral)" for the neutral language, the plain id otherwise.
+[[nodiscard]] std::wstring FormatLang( uint16_t lang );
+
 // Logs an operation failure and returns 'ec' unchanged; lists candidate
 // languages when the resource exists in several of them.
 [[nodiscard]] std::error_code Report(

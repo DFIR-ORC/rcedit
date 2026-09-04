@@ -49,6 +49,31 @@ struct ListEntry
     const ListOptions& options,
     std::vector< ListEntry >& out );
 
+// What Set actually wrote, filled only on success.
+struct SetResult
+{
+    uint16_t lang = 0;  // language written, 0 when none was requested
+    uint64_t inputSize = 0;  // payload as handed to Set
+    uint64_t storedSize = 0;  // bytes placed in the PE, packed if a
+                              // codec applied
+    CodecId codec = CodecId::None;  // codec applied, None if plain
+};
+
+// What Get actually read, filled only on success.
+struct GetResult
+{
+    uint16_t lang = 0;  // language the key resolved to
+    uint64_t storedSize = 0;  // bytes held in the PE, before any
+                              // decompression
+    CodecId codec = CodecId::None;  // codec detected, None if plain
+};
+
+// What Remove actually deleted, filled only on success.
+struct RemoveResult
+{
+    uint16_t lang = 0;  // language the key resolved to
+};
+
 // Decompresses by magic unless 'raw'. A detected but disabled codec is
 // errc::codec_disabled.
 [[nodiscard]] std::error_code Get(
@@ -56,7 +81,8 @@ struct ListEntry
     const std::filesystem::path& pe,
     const ResourceKey& key,
     bool raw,
-    std::vector< uint8_t >& out );
+    std::vector< uint8_t >& out,
+    GetResult* result = nullptr );
 
 // key.lang unset means neutral. With 'output', 'pe' is copied there first and
 // only the copy is modified.
@@ -66,13 +92,15 @@ struct ListEntry
     const ResourceKey& key,
     std::span< const uint8_t > data,
     CodecId codec,
-    const std::optional< std::filesystem::path >& output );
+    const std::optional< std::filesystem::path >& output,
+    SetResult* result = nullptr );
 
 [[nodiscard]] std::error_code Remove(
     ResourceEngine& engine,
     const std::filesystem::path& pe,
     const ResourceKey& key,
-    const std::optional< std::filesystem::path >& output );
+    const std::optional< std::filesystem::path >& output,
+    RemoveResult* result = nullptr );
 
 [[nodiscard]] std::error_code Hexdump(
     ResourceEngine& engine,

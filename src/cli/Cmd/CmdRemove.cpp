@@ -40,15 +40,24 @@ std::error_code HandleRemove( const ParsedArgs& args )
     }
 
     auto engine = MakeWin32Engine();
+    const auto output = OutputPath( args );
+    RemoveResult result;
     if( const auto ec =
-            Remove( *engine, args.pePath, *key, OutputPath( args ) ) ) {
+            Remove( *engine, args.pePath, *key, output, &result ) ) {
         return Report( ec, args.pePath, *key );
     }
 
-    Log::Info(
-        L"Removed {}/{}",
-        FormatResourceType( key->type ),
-        FormatResourceName( key->name ) );
+    const ConfirmationField fields[] = {
+        { L"Type", FormatTypeVerbose( key->type ) },
+        { L"Name", FormatResourceName( key->name ) },
+        { L"Lang", FormatLang( result.lang ) },
+    };
+
+    PrintConfirmation(
+        std::format(
+            L"Removed resource from '{}'",
+            ( output ? *output : args.pePath ).wstring() ),
+        fields );
     return {};
 }
 
