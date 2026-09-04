@@ -16,6 +16,11 @@ namespace rcedit::Out {
 // Program output: UTF-8 to stdout, no decoration.
 void Write( std::wstring_view text );
 
+// Undecorated UTF-8 to stderr, for human-facing text that must not land in a
+// piped stdout: the usage block printed after a usage error. Diagnostics go
+// through Log instead, which tags them.
+void WriteErr( std::wstring_view text );
+
 template < typename... Args >
 void Print( std::wformat_string< Args... > fmt, Args&&... args )
 {

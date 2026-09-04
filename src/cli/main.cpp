@@ -33,9 +33,12 @@ int Main( std::span< const std::wstring > argv )
     auto parsed = Parse( argv, commands );
     if( !parsed ) {
         Log::Error( L"{}", parsed.error().message );
+
+        // The message is a diagnostic and stays tagged; the usage block that
+        // follows it is a page of help text, so it goes out undecorated -- on
+        // stderr, since stdout belongs to the command that failed to run.
         const auto* command = parsed.error().command;
-        Log::Write(
-            Log::Level::Error,
+        Out::WriteErr(
             command ? FormatCommandUsage( *command )
                     : FormatUsage( commands ) );
         return kUsageError;

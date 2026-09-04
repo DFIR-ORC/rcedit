@@ -18,6 +18,8 @@ set(PE "${WORKDIR}/target.exe")
 file(COPY_FILE "${FIXTURE}" "${PE}")
 
 # run(<expected_exit> <var_for_stdout> args...)
+# Also exports the run's stderr as LAST_STDERR, so a caller can assert that a
+# successful command stayed off stderr and that a usage block is untagged.
 function(run expected outvar)
     execute_process(
         COMMAND "${RCEDIT}" ${ARGN}
@@ -29,6 +31,13 @@ function(run expected outvar)
         message(FATAL_ERROR "rcedit ${ARGN}\nexpected exit ${expected}, got ${rc}\nstdout:\n${out}\nstderr:\n${err}")
     endif()
     set(${outvar} "${out}" PARENT_SCOPE)
+    set(LAST_STDERR "${err}" PARENT_SCOPE)
+endfunction()
+
+function(expect_empty text what)
+    if(NOT text STREQUAL "")
+        message(FATAL_ERROR "${what}: expected nothing, got:\n${text}")
+    endif()
 endfunction()
 
 function(expect_match text pattern what)
@@ -47,6 +56,10 @@ endfunction()
 run(2 out)
 run(2 out list)
 run(2 out list "${PE}" --bogus)
+# the message is tagged, the usage block that follows it is not
+expect_match("${LAST_STDERR}" "\\[E\\] [^\n]*--bogus" "usage error message")
+expect_match("${LAST_STDERR}" "(^|\n)Usage: rcedit list" "usage block untagged")
+expect_empty("${out}" "usage error on stdout")
 run(2 out set "${PE}" -t RT_RCDATA -n CONFIG)
 run(0 out --version)
 expect_match("${out}" "rcedit [0-9]+\\.[0-9]+\\.[0-9]+" "--version")
