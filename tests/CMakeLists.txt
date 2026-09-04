@@ -19,14 +19,17 @@ add_executable(rcedit_tests
     test_ops.cpp
     test_args.cpp
     test_commands.cpp
-    "${CMAKE_SOURCE_DIR}/src/cli/args.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/commands.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/Cmd/CmdCommon.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/Cmd/CmdList.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/Cmd/CmdGet.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/Cmd/CmdSet.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/Cmd/CmdRemove.cpp"
-    "${CMAKE_SOURCE_DIR}/src/cli/Cmd/CmdHexdump.cpp"
+    # PROJECT_SOURCE_DIR, not CMAKE_SOURCE_DIR: the latter is the top-level
+    # source directory, which is not rcedit's when rcedit is embedded with
+    # add_subdirectory().
+    "${PROJECT_SOURCE_DIR}/src/cli/args.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/commands.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/Cmd/CmdCommon.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/Cmd/CmdList.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/Cmd/CmdGet.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/Cmd/CmdSet.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/Cmd/CmdRemove.cpp"
+    "${PROJECT_SOURCE_DIR}/src/cli/Cmd/CmdHexdump.cpp"
 )
 target_link_libraries(rcedit_tests PRIVATE rcedit_core)
 target_include_directories(rcedit_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

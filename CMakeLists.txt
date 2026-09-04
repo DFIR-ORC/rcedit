@@ -41,14 +41,23 @@ endif()
 if(BUILD_SHARED_LIBS)
     message(FATAL_ERROR "rcedit is static only: BUILD_SHARED_LIBS must be OFF")
 endif()
-if(NOT VCPKG_TARGET_TRIPLET STREQUAL "x64-windows-static")
-    message(FATAL_ERROR "rcedit is static only: triplet must be x64-windows-static (got ${VCPKG_TARGET_TRIPLET})")
+# Only the codecs pull vcpkg ports in. The static CRT itself comes from
+# CMAKE_MSVC_RUNTIME_LIBRARY below and from src/cli's explicit /NODEFAULTLIB
+# link line, neither of which depends on the triplet, so a codec-less build
+# has nothing left to conflict with: a parent project embedding rcedit for
+# its resource editing alone may use whatever triplet it needs.
+if(RCEDIT_ENABLE_7Z OR RCEDIT_ENABLE_ZSTD)
+    if(NOT VCPKG_TARGET_TRIPLET STREQUAL "x64-windows-static")
+        message(FATAL_ERROR "rcedit codecs are static only: triplet must be x64-windows-static (got ${VCPKG_TARGET_TRIPLET})")
+    endif()
 endif()
 
 get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-if(_is_multi_config)
+if(_is_multi_config AND PROJECT_IS_TOP_LEVEL)
     # Ninja Multi-Config's built-in default omits MinSizeRel; the presets
-    # build and test that configuration, so declare it explicitly.
+    # build and test that configuration, so declare it explicitly. Only when
+    # rcedit drives the build: this is a FORCE write to the cache, and a
+    # parent project's own configuration types must win over ours.
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release;RelWithDebInfo;MinSizeRel" CACHE STRING "" FORCE)
 endif()
 
