@@ -70,12 +70,14 @@ expect_match("${out}" "--value-path" "set --help")
 
 # baseline
 run(0 out list "${PE}")
-expect_match("${out}" "RT_RCDATA +FIXTURE +0 +7 +-" "list baseline")
+expect_match("${out}" "TYPE +NAME +LANG +SIZE +CODEC +UNPACKED +PREVIEW" "list header")
+expect_no_match("${out}" "CONTENT" "list header no longer says CONTENT")
+expect_match("${out}" "RT_RCDATA +FIXTURE +0 +7 +- +- +fixture" "list baseline")
 
 # set / list / get / hexdump
 run(0 out set "${PE}" -t RT_RCDATA -n CONFIG --value "<config/>")
 run(0 out list "${PE}")
-expect_match("${out}" "RT_RCDATA +CONFIG +0 +9 +-" "list after set")
+expect_match("${out}" "RT_RCDATA +CONFIG +0 +9 +- +- +<config/>" "list after set")
 
 run(0 out get "${PE}" -t RCDATA -n CONFIG -o "${WORKDIR}/config.bin")
 file(READ "${WORKDIR}/config.bin" content)

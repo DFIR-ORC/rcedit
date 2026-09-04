@@ -68,7 +68,7 @@ std::error_code HandleList( const ParsedArgs& args )
     }
 
     Out::Print(
-        L"{:<{}}  {:<{}}  {:>6}  {:>10}  {:<5}  {:>10}\n",
+        L"{:<{}}  {:<{}}  {:>6}  {:>10}  {:<5}  {:>10}  {}\n",
         L"TYPE",
         typeWidth,
         L"NAME",
@@ -76,7 +76,8 @@ std::error_code HandleList( const ParsedArgs& args )
         L"LANG",
         L"SIZE",
         L"CODEC",
-        L"CONTENT" );
+        L"UNPACKED",
+        L"PREVIEW" );
     for( const auto& e : entries ) {
         std::wstring codec = L"-";
         std::wstring content = L"-";
@@ -90,8 +91,9 @@ std::error_code HandleList( const ParsedArgs& args )
             }
         }
 
+        // The preview is last and unpadded: nothing follows it to align to.
         Out::Print(
-            L"{:<{}}  {:<{}}  {:>6}  {:>10}  {:<5}  {:>10}\n",
+            L"{:<{}}  {:<{}}  {:>6}  {:>10}  {:<5}  {:>10}  {}\n",
             FormatResourceType( e.key.type ),
             typeWidth,
             FormatResourceName( e.key.name ),
@@ -99,7 +101,8 @@ std::error_code HandleList( const ParsedArgs& args )
             *e.key.lang,
             e.size,
             codec,
-            content );
+            content,
+            FormatPreview( e.preview ) );
     }
 
     return {};

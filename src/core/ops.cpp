@@ -43,6 +43,14 @@ std::error_code ReadResolved(
     return engine.Read( resolved, stored );
 }
 
+// Shared by the hexdump's ascii pane and the list preview so the two always
+// agree on what counts as printable.
+constexpr wchar_t PrintableOrDot( uint8_t byte )
+{
+    return ( byte >= 0x20 && byte <= 0x7E ) ? static_cast< wchar_t >( byte )
+                                            : L'.';
+}
+
 std::error_code MaybeDecompress( std::vector< uint8_t >& data, bool raw )
 {
     const CodecId detected = DetectCodec( data );
@@ -262,9 +270,19 @@ std::error_code List(
             return ec;
         }
 
-        ListEntry item{
-            entry.key, entry.size, DetectCodec( stored ), std::nullopt
-        };
+        // Taken from the bytes as stored: List never decompresses, so a packed
+        // resource previews its codec header, not its payload.
+        std::vector< uint8_t > preview(
+            stored.begin(),
+            stored.begin()
+                + static_cast< std::ptrdiff_t >(
+                    std::min( kPreviewBytes, stored.size() ) ) );
+
+        ListEntry item{ entry.key,
+                        entry.size,
+                        DetectCodec( stored ),
+                        std::nullopt,
+                        std::move( preview ) };
         if( item.codec != CodecId::None ) {
             if( const auto codec = FindCodec( item.codec ) ) {
                 item.contentSize = ( *codec )->ContentSize( stored );
@@ -424,6 +442,21 @@ std::error_code Hexdump(
     return {};
 }
 
+std::wstring FormatPreview( std::span< const uint8_t > data )
+{
+    if( data.empty() ) {
+        return L"-";
+    }
+
+    std::wstring out;
+    out.reserve( data.size() );
+    for( const uint8_t byte : data ) {
+        out += PrintableOrDot( byte );
+    }
+
+    return out;
+}
+
 std::wstring FormatHexdump(
     std::span< const uint8_t > data,
     std::optional< size_t > limit )
@@ -453,9 +486,7 @@ std::wstring FormatHexdump(
 
         std::wstring ascii;
         for( size_t i = 0; i < count; ++i ) {
-            const uint8_t c = data[ offset + i ];
-            ascii +=
-                ( c >= 0x20 && c <= 0x7E ) ? static_cast< wchar_t >( c ) : L'.';
+            ascii += PrintableOrDot( data[ offset + i ] );
         }
 
         out += std::format( L"{:08X}  {} |{}|\n", offset, hex, ascii );

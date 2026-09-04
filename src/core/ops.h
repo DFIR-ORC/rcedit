@@ -27,6 +27,10 @@ struct ListOptions
     std::optional< ResourceId > name;
 };
 
+// Leading bytes of a resource kept for a text preview. Sized to one screen
+// column, not to a parse: nothing reads a header out of this.
+inline constexpr size_t kPreviewBytes = 16;
+
 struct ListEntry
 {
     ResourceKey key;  // lang always set
@@ -34,6 +38,9 @@ struct ListEntry
     CodecId codec;  // detected by magic, None if plain
     std::optional< uint64_t > contentSize;  // decompressed size when the codec
                                             // is available and records it
+    std::vector< uint8_t > preview;  // first kPreviewBytes as stored, so a
+                                     // compressed resource shows its codec
+                                     // header rather than its payload
 };
 
 [[nodiscard]] std::error_code List(
@@ -86,6 +93,10 @@ struct ListEntry
 [[nodiscard]] std::wstring FormatHexdump(
     std::span< const uint8_t > data,
     std::optional< size_t > limit );
+
+// One line of text for a ListEntry::preview: printable bytes as themselves,
+// anything else as '.', and "-" for a resource with no bytes at all.
+[[nodiscard]] std::wstring FormatPreview( std::span< const uint8_t > data );
 
 [[nodiscard]] bool IsRunningExecutable( const std::filesystem::path& path );
 

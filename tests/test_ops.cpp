@@ -8,6 +8,7 @@
 #include "check.h"
 #include "temp.h"
 
+#include <algorithm>
 #include <fstream>
 
 #include <windows.h>
@@ -37,6 +38,12 @@ const ResourceKey kConfigFr{ kRcData,
 const ResourceKey kConfigEn{ kRcData,
                              ResourceId( std::wstring( L"CONFIG" ) ),
                              1033 };
+
+#ifdef RCEDIT_HAS_ZSTD
+constexpr CodecId kPreviewCodec = CodecId::Zstd;
+#elif defined( RCEDIT_HAS_7Z )
+constexpr CodecId kPreviewCodec = CodecId::SevenZip;
+#endif
 
 std::vector< uint8_t > Bytes( std::string_view s )
 {
@@ -97,6 +104,70 @@ void ListBaseline()
     CHECK(
         e != nullptr && e->size == 7 && e->codec == CodecId::None
         && !e->contentSize.has_value() );
+}
+
+void ListCarriesPreview()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    auto engine = MakeWin32Engine();
+
+    CHECK_EC_OK(
+        Set( *engine,
+             pe,
+             kConfigNoLang,
+             Bytes( "<config>hello world</config>" ),
+             CodecId::None,
+             std::nullopt ) );
+
+    const auto entries = ListAll( pe );
+    const auto* e = Find( entries, kConfigNeutral );
+    CHECK( e != nullptr );
+
+    // Capped at kPreviewBytes even though the resource is longer.
+    CHECK( e->preview.size() == kPreviewBytes );
+    CHECK( FormatPreview( e->preview ) == L"<config>hello wo" );
+
+    // A resource shorter than the cap previews whole.
+    const auto* baseline = Find( entries, kBaseline );
+    CHECK( baseline != nullptr );
+    CHECK( baseline->preview.size() == 7 );
+    CHECK( FormatPreview( baseline->preview ) == L"fixture" );
+}
+
+#if defined( RCEDIT_HAS_ZSTD ) || defined( RCEDIT_HAS_7Z )
+// A compressed resource previews the bytes as stored, not the payload: List
+// never decompresses, so what shows up is the codec's own header.
+void ListPreviewIsNotDecompressed()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    auto engine = MakeWin32Engine();
+    const auto payload = Pattern( 50000 );
+
+    CHECK_EC_OK( Set(
+        *engine, pe, kConfigNoLang, payload, kPreviewCodec, std::nullopt ) );
+
+    const auto entries = ListAll( pe );
+    const auto* e = Find( entries, kConfigNeutral );
+    CHECK( e != nullptr && e->codec == kPreviewCodec );
+    CHECK( e->preview.size() == kPreviewBytes );
+    CHECK(
+        !std::equal( e->preview.begin(), e->preview.end(), payload.begin() ) );
+}
+#endif
+
+void FormatPreviewReplacesUnprintableBytes()
+{
+    const std::vector< uint8_t > mixed{ 0x89, 'P',  'N',  'G',
+                                        0x0D, 0x0A, 0x1A, 0x0A };
+    CHECK( FormatPreview( mixed ) == L".PNG...." );
+
+    // 0x20 and 0x7E are the edges of the printable range.
+    const std::vector< uint8_t > edges{ 0x1F, 0x20, 0x7E, 0x7F };
+    CHECK( FormatPreview( edges ) == L". ~." );
+
+    CHECK( FormatPreview( {} ) == L"-" );
 }
 
 void ListFilters()
@@ -481,6 +552,12 @@ void HexdumpOfResource()
 constexpr TestCase kCases[] = {
     { "ListBaseline", ListBaseline },
     { "ListFilters", ListFilters },
+    { "ListCarriesPreview", ListCarriesPreview },
+#if defined( RCEDIT_HAS_ZSTD ) || defined( RCEDIT_HAS_7Z )
+    { "ListPreviewIsNotDecompressed", ListPreviewIsNotDecompressed },
+#endif
+    { "FormatPreviewReplacesUnprintableBytes",
+      FormatPreviewReplacesUnprintableBytes },
     { "SetThenGetUncompressed", SetThenGetUncompressed },
     { "SetEmptyFails", SetEmptyFails },
     { "SetWithOutputLeavesSourceUnchanged",
