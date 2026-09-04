@@ -8,7 +8,10 @@
 #include "check.h"
 #include "temp.h"
 
+#include <algorithm>
 #include <fstream>
+#include <initializer_list>
+#include <istream>
 
 #include "core/engine.h"
 #include "core/error.h"
@@ -52,39 +55,105 @@ bool Contains(
     return false;
 }
 
-// File offset of OptionalHeader.CheckSum, walked from the DOS header with
-// plain arithmetic rather than with the IMAGE_* structs, so the test does not
+// Start of the optional header, walked from the DOS header with plain
+// arithmetic rather than with the IMAGE_* structs, so the test does not
 // restate the engine's own computation: e_lfanew at 0x3C, then 4 bytes of
-// "PE\0\0", 20 bytes of IMAGE_FILE_HEADER and 64 bytes into the optional
-// header (the same in PE32 and PE32+).
-std::streamoff CheckSumOffset( const std::filesystem::path& pe )
+// "PE\0\0" and 20 bytes of IMAGE_FILE_HEADER.
+std::streamoff OptionalHeaderOffset( std::istream& file )
 {
-    std::ifstream file( pe, std::ios::binary );
     file.seekg( 0x3C );
     int32_t lfanew = 0;
     file.read( reinterpret_cast< char* >( &lfanew ), sizeof( lfanew ) );
     CHECK( file.good() );
-    return static_cast< std::streamoff >( lfanew ) + 4 + 20 + 64;
+    return static_cast< std::streamoff >( lfanew ) + 4 + 20;
+}
+
+// CheckSum is 64 bytes into the optional header, the same in PE32 and PE32+.
+std::streamoff CheckSumOffset( const std::filesystem::path& pe )
+{
+    std::ifstream file( pe, std::ios::binary );
+    return OptionalHeaderOffset( file ) + 64;
+}
+
+// The certificate table is the fifth data directory, and the directories
+// start at 96 in a PE32 optional header, at 112 in a PE32+ one.
+std::streamoff SecurityOffset( const std::filesystem::path& pe )
+{
+    std::ifstream file( pe, std::ios::binary );
+    const auto optional = OptionalHeaderOffset( file );
+    file.seekg( optional );
+    uint16_t magic = 0;
+    file.read( reinterpret_cast< char* >( &magic ), sizeof( magic ) );
+    CHECK( file.good() );
+    return optional + ( magic == 0x20B ? 112 : 96 ) + 4 * 8;
+}
+
+std::vector< uint8_t > ReadHeaderField(
+    const std::filesystem::path& pe,
+    std::streamoff offset,
+    size_t size )
+{
+    std::ifstream file( pe, std::ios::binary );
+    file.seekg( offset );
+    std::vector< uint8_t > bytes( size );
+    file.read( reinterpret_cast< char* >( bytes.data() ), size );
+    CHECK( file.good() );
+    return bytes;
+}
+
+void WriteHeaderField(
+    const std::filesystem::path& pe,
+    std::streamoff offset,
+    std::span< const uint8_t > bytes )
+{
+    std::ofstream file( pe, std::ios::binary | std::ios::in );
+    file.seekp( offset );
+    file.write(
+        reinterpret_cast< const char* >( bytes.data() ),
+        static_cast< std::streamsize >( bytes.size() ) );
+    CHECK( file.good() );
+}
+
+std::vector< uint8_t > LittleEndian( std::initializer_list< uint32_t > words )
+{
+    std::vector< uint8_t > bytes;
+    for( const uint32_t word : words ) {
+        for( int shift = 0; shift < 32; shift += 8 ) {
+            bytes.push_back( static_cast< uint8_t >( word >> shift ) );
+        }
+    }
+
+    return bytes;
 }
 
 uint32_t ReadCheckSum( const std::filesystem::path& pe )
 {
-    std::ifstream file( pe, std::ios::binary );
-    file.seekg( CheckSumOffset( pe ) );
-    uint32_t checksum = 0;
-    file.read( reinterpret_cast< char* >( &checksum ), sizeof( checksum ) );
-    CHECK( file.good() );
-    return checksum;
+    const auto bytes = ReadHeaderField( pe, CheckSumOffset( pe ), 4 );
+    return bytes[ 0 ] | ( bytes[ 1 ] << 8 ) | ( bytes[ 2 ] << 16 )
+        | ( bytes[ 3 ] << 24 );
 }
 
 void WriteCheckSum( const std::filesystem::path& pe, uint32_t checksum )
 {
-    const auto offset = CheckSumOffset( pe );
-    std::ofstream file( pe, std::ios::binary | std::ios::in );
-    file.seekp( offset );
-    file.write(
-        reinterpret_cast< const char* >( &checksum ), sizeof( checksum ) );
-    CHECK( file.good() );
+    WriteHeaderField( pe, CheckSumOffset( pe ), LittleEndian( { checksum } ) );
+}
+
+// The engine only ever reads the entry, so a made-up address and size stand
+// in for a real certificate table.
+void WriteSecurityDirectory(
+    const std::filesystem::path& pe,
+    uint32_t address,
+    uint32_t size )
+{
+    WriteHeaderField(
+        pe, SecurityOffset( pe ), LittleEndian( { address, size } ) );
+}
+
+bool HasSecurityDirectory( const std::filesystem::path& pe )
+{
+    const auto bytes = ReadHeaderField( pe, SecurityOffset( pe ), 8 );
+    return std::ranges::any_of(
+        bytes, []( uint8_t byte ) { return byte != 0; } );
 }
 
 void OpenMissingFileFails()
@@ -278,10 +347,7 @@ void CommitClearsCheckSum()
     // The update leaves the old checksum stale; it must be zeroed, not
     // recomputed.
     CHECK( ReadCheckSum( pe ) == 0 );
-    CHECK( Contains(
-        EnumerateOf( pe ),
-        kConfig,
-        static_cast< uint32_t >( kConfigBytes.size() ) ) );
+    CHECK( Contains( EnumerateOf( pe ), kConfig, 9 ) );
 }
 
 void CommitOnZeroCheckSumKeepsIt()
@@ -299,19 +365,42 @@ void CommitOnZeroCheckSumKeepsIt()
     CHECK( EnumerateOf( pe ).empty() );
 }
 
-void DiscardLeavesCheckSum()
+void CommitRemovesSecurityDirectory()
+{
+    TempDir dir;
+    const auto pe = CopyFixture( dir, L"a.exe" );
+    WriteSecurityDirectory( pe, 0x8290, 10064 );
+    CHECK( HasSecurityDirectory( pe ) );
+
+    auto engine = MakeWin32Engine();
+    CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
+    CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
+    CHECK_EC_OK( engine->Commit() );
+
+    // The update invalidated the signature, so the entry that described it
+    // must be gone rather than left dangling.
+    CHECK( !HasSecurityDirectory( pe ) );
+    CHECK( Contains(
+        EnumerateOf( pe ),
+        kConfig,
+        static_cast< uint32_t >( kConfigBytes.size() ) ) );
+}
+
+void DiscardLeavesHeaders()
 {
     TempDir dir;
     const auto pe = CopyFixture( dir, L"a.exe" );
     WriteCheckSum( pe, 0xDEADBEEF );
+    WriteSecurityDirectory( pe, 0x8290, 10064 );
 
     auto engine = MakeWin32Engine();
     CHECK_EC_OK( engine->Open( pe, OpenMode::ReadWrite ) );
     CHECK_EC_OK( engine->Write( kConfig, kConfigBytes ) );
     engine->Discard();
 
-    // Nothing was written to the file, so its checksum still matches.
+    // Nothing was written to the file, so both still describe it.
     CHECK( ReadCheckSum( pe ) == 0xDEADBEEF );
+    CHECK( HasSecurityDirectory( pe ) );
 }
 
 constexpr TestCase kCases[] = {
@@ -330,7 +419,8 @@ constexpr TestCase kCases[] = {
     { "DestructorWithoutCommitDiscards", DestructorWithoutCommitDiscards },
     { "CommitClearsCheckSum", CommitClearsCheckSum },
     { "CommitOnZeroCheckSumKeepsIt", CommitOnZeroCheckSumKeepsIt },
-    { "DiscardLeavesCheckSum", DiscardLeavesCheckSum },
+    { "CommitRemovesSecurityDirectory", CommitRemovesSecurityDirectory },
+    { "DiscardLeavesHeaders", DiscardLeavesHeaders },
 };
 
 }  // namespace

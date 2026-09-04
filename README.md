@@ -47,11 +47,15 @@ rcedit remove app.exe -t RT_RCDATA -n CONFIG -o app-without-config.exe
 
 Exit codes: 0 success, 1 the command failed, 2 usage error.
 
-A resource update invalidates the PE checksum of the file it modifies. `set`
-and `remove` clear `OptionalHeader.CheckSum` instead of recomputing it, so the
-image is left with no checksum, which the loader accepts for anything but a
-driver or a boot-time DLL. Run `editbin /release` on the result if a valid
-checksum is required.
+A resource update invalidates both the PE checksum and the Authenticode
+signature of the file it modifies, so `set` and `remove` drop them.
+`OptionalHeader.CheckSum` is cleared instead of recomputed: the image is left
+with no checksum, which the loader accepts for anything but a driver or a
+boot-time DLL. Run `editbin /release` on the result if a valid one is
+required. The certificate table entry goes too, with a warning on stderr --
+Windows discards the signature bytes but leaves the entry behind, pointing
+past the end of the shortened file. Sign the result again if it must stay
+signed.
 
 ## Build
 

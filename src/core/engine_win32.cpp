@@ -119,19 +119,45 @@ BOOL CALLBACK OnType( HMODULE module, LPWSTR type, LONG_PTR param )
     }
 }
 
-// Offset of OptionalHeader.CheckSum from the start of the NT headers. The
-// same in PE32 and PE32+: every field before it sits at the same place in
-// both optional headers, ImageBase's four extra bytes making up for the
-// BaseOfData that PE32+ does not have.
-constexpr LONGLONG kCheckSumOffset =
-    offsetof( IMAGE_NT_HEADERS32, OptionalHeader.CheckSum );
+// Where the optional header starts, relative to the NT headers.
+constexpr LONGLONG kOptionalHeaderOffset =
+    offsetof( IMAGE_NT_HEADERS32, OptionalHeader );
 static_assert(
-    kCheckSumOffset == offsetof( IMAGE_NT_HEADERS64, OptionalHeader.CheckSum ),
+    kOptionalHeaderOffset == offsetof( IMAGE_NT_HEADERS64, OptionalHeader ),
+    "PE32 and PE32+ must agree on where the optional header starts" );
+
+// CheckSum sits at the same place in both optional headers: ImageBase's four
+// extra bytes make up for the BaseOfData that PE32+ does not have.
+constexpr WORD kCheckSumInOptional =
+    offsetof( IMAGE_OPTIONAL_HEADER32, CheckSum );
+static_assert(
+    kCheckSumInOptional == offsetof( IMAGE_OPTIONAL_HEADER64, CheckSum ),
     "PE32 and PE32+ must agree on where the checksum sits" );
 
+// The data directories, on the other hand, start further in for PE32+, whose
+// four 64-bit fields push them back by sixteen bytes.
+constexpr WORD kSecurityInOptional32 =
+    offsetof( IMAGE_OPTIONAL_HEADER32, DataDirectory )
+    + IMAGE_DIRECTORY_ENTRY_SECURITY * sizeof( IMAGE_DATA_DIRECTORY );
+constexpr WORD kSecurityInOptional64 =
+    offsetof( IMAGE_OPTIONAL_HEADER64, DataDirectory )
+    + IMAGE_DIRECTORY_ENTRY_SECURITY * sizeof( IMAGE_DATA_DIRECTORY );
+constexpr WORD kRvaCountInOptional32 =
+    offsetof( IMAGE_OPTIONAL_HEADER32, NumberOfRvaAndSizes );
+constexpr WORD kRvaCountInOptional64 =
+    offsetof( IMAGE_OPTIONAL_HEADER64, NumberOfRvaAndSizes );
+
 // Smallest optional header that still holds a checksum.
-constexpr WORD kMinOptionalHeaderSize =
-    offsetof( IMAGE_OPTIONAL_HEADER32, CheckSum ) + sizeof( DWORD );
+constexpr WORD kMinOptionalHeaderSize = kCheckSumInOptional + sizeof( DWORD );
+
+// File offsets of the two header fields a resource update invalidates,
+// resolved once from the DOS and NT headers.
+struct HeaderFields
+{
+    LONGLONG checkSum = 0;  // OptionalHeader.CheckSum
+    LONGLONG security = 0;  // DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY],
+                            // 0 when the optional header does not reach it
+};
 
 std::error_code ReadAt( HANDLE file, LONGLONG offset, void* buffer, DWORD size )
 {
@@ -173,10 +199,9 @@ std::error_code WriteAt(
                            : Win32Error( ERROR_WRITE_FAULT );
 }
 
-// Walks the DOS and file headers to locate OptionalHeader.CheckSum, filling
-// its file offset and current value. Anything that does not parse as a PE is
-// ERROR_BAD_EXE_FORMAT.
-std::error_code FindCheckSum( HANDLE file, LONGLONG& offset, DWORD& value )
+// Walks the DOS and file headers to locate the fields a commit has to fix
+// up. Anything that does not parse as a PE is ERROR_BAD_EXE_FORMAT.
+std::error_code FindHeaderFields( HANDLE file, HeaderFields& fields )
 {
     IMAGE_DOS_HEADER dos = {};
     if( const auto ec = ReadAt( file, 0, &dos, sizeof( dos ) ) ) {
@@ -212,30 +237,123 @@ std::error_code FindCheckSum( HANDLE file, LONGLONG& offset, DWORD& value )
         return Win32Error( ERROR_BAD_EXE_FORMAT );
     }
 
-    const LONGLONG at = dos.e_lfanew + kCheckSumOffset;
-    DWORD checksum = 0;
-    if( const auto ec = ReadAt( file, at, &checksum, sizeof( checksum ) ) ) {
+    const LONGLONG optional = dos.e_lfanew + kOptionalHeaderOffset;
+
+    WORD magic = 0;
+    if( const auto ec = ReadAt( file, optional, &magic, sizeof( magic ) ) ) {
         return ec;
     }
 
-    offset = at;
-    value = checksum;
+    if( magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC
+        && magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ) {
+        return Win32Error( ERROR_BAD_EXE_FORMAT );
+    }
+
+    HeaderFields found;
+    found.checkSum = optional + kCheckSumInOptional;
+
+    // The certificate table is the fifth data directory; an image is free to
+    // declare fewer, or an optional header too short to hold them.
+    const bool pe64 = magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    const WORD securityInOptional =
+        pe64 ? kSecurityInOptional64 : kSecurityInOptional32;
+    if( header.SizeOfOptionalHeader
+        < securityInOptional + sizeof( IMAGE_DATA_DIRECTORY ) ) {
+        fields = found;
+        return {};
+    }
+
+    DWORD directories = 0;
+    if( const auto ec = ReadAt(
+            file,
+            optional + ( pe64 ? kRvaCountInOptional64 : kRvaCountInOptional32 ),
+            &directories,
+            sizeof( directories ) ) ) {
+        return ec;
+    }
+
+    if( directories > IMAGE_DIRECTORY_ENTRY_SECURITY ) {
+        found.security = optional + securityInOptional;
+    }
+
+    fields = found;
     return {};
 }
 
-// Zeroes OptionalHeader.CheckSum when the image carries one, a no-op when it
-// does not. EndUpdateResourceW rewrites the resource directory and shifts
-// what follows it without touching the checksum, so the value left in the
-// header no longer matches the bytes on disk; zero is what a linker writes
-// when it computes none, and what the loader accepts for anything that is
-// not a driver or a boot-time DLL.
+// Zeroes OptionalHeader.CheckSum when the image carries one, reporting in
+// 'cleared' the value that was there. EndUpdateResourceW rewrites the
+// resource directory and shifts what follows it without touching the
+// checksum, so the value left in the header no longer matches the bytes on
+// disk; zero is what a linker writes when it computes none, and what the
+// loader accepts for anything that is not a driver or a boot-time DLL.
 //
 // TODO: recompute the checksum rather than clear it, for the images that do
 // need a valid one. The algorithm is a 16-bit ones' complement sum over the
 // whole file plus its size, with the checksum field itself read as zero;
 // imagehlp's CheckSumMappedFile does it but would add a DLL outside the
 // import allowlist, so it has to be written here.
-std::error_code ClearCheckSum( const std::filesystem::path& path )
+std::error_code ClearCheckSum( HANDLE file, LONGLONG offset, DWORD& cleared )
+{
+    cleared = 0;
+
+    DWORD checksum = 0;
+    if( const auto ec =
+            ReadAt( file, offset, &checksum, sizeof( checksum ) ) ) {
+        return ec;
+    }
+
+    if( checksum == 0 ) {
+        return {};
+    }
+
+    constexpr DWORD kNoCheckSum = 0;
+    if( const auto ec =
+            WriteAt( file, offset, &kNoCheckSum, sizeof( kNoCheckSum ) ) ) {
+        return ec;
+    }
+
+    cleared = checksum;
+    return {};
+}
+
+// Zeroes the certificate table's data directory entry when the image
+// declares one, reporting in 'cleared' the entry that was there.
+//
+// EndUpdateResourceW drops the certificate bytes -- the file comes back
+// shorter by exactly the size the entry claims -- but leaves the entry
+// itself in place, pointing past the end of the file. What is left is not a
+// signature that merely fails to verify but a dangling offset, so the entry
+// goes rather than being kept. Nothing has to be truncated: the bytes it
+// pointed at are already gone.
+std::error_code ClearSecurityDirectory(
+    HANDLE file,
+    LONGLONG offset,
+    IMAGE_DATA_DIRECTORY& cleared )
+{
+    cleared = {};
+
+    IMAGE_DATA_DIRECTORY entry = {};
+    if( const auto ec = ReadAt( file, offset, &entry, sizeof( entry ) ) ) {
+        return ec;
+    }
+
+    if( entry.VirtualAddress == 0 && entry.Size == 0 ) {
+        return {};
+    }
+
+    constexpr IMAGE_DATA_DIRECTORY kNoSecurity = {};
+    if( const auto ec =
+            WriteAt( file, offset, &kNoSecurity, sizeof( kNoSecurity ) ) ) {
+        return ec;
+    }
+
+    cleared = entry;
+    return {};
+}
+
+// Drops what the resource update just invalidated in the PE headers: the
+// certificate table entry, then the checksum.
+std::error_code ClearStaleHeaders( const std::filesystem::path& path )
 {
     FileHandle file(
         ::CreateFileW(
@@ -250,27 +368,43 @@ std::error_code ClearCheckSum( const std::filesystem::path& path )
         return LastWin32Error();
     }
 
-    LONGLONG offset = 0;
+    HeaderFields fields;
+    if( const auto ec = FindHeaderFields( file.get(), fields ) ) {
+        return ec;
+    }
+
+    if( fields.security != 0 ) {
+        IMAGE_DATA_DIRECTORY security = {};
+        if( const auto ec = ClearSecurityDirectory(
+                file.get(), fields.security, security ) ) {
+            return ec;
+        }
+
+        if( security.Size != 0 || security.VirtualAddress != 0 ) {
+            Log::Warn(
+                L"Removed the certificate table of '{}' ({} bytes at offset "
+                L"0x{:X}), invalidated by the resource update: the file is no "
+                L"longer signed",
+                path.wstring(),
+                security.Size,
+                security.VirtualAddress );
+        }
+    }
+
     DWORD checksum = 0;
-    if( const auto ec = FindCheckSum( file.get(), offset, checksum ) ) {
+    if( const auto ec =
+            ClearCheckSum( file.get(), fields.checkSum, checksum ) ) {
         return ec;
     }
 
-    if( checksum == 0 ) {
-        return {};
+    if( checksum != 0 ) {
+        Log::Debug(
+            L"Cleared the stale PE checksum 0x{:08X} of '{}', a new one is not "
+            L"computed",
+            checksum,
+            path.wstring() );
     }
 
-    constexpr DWORD kNoCheckSum = 0;
-    if( const auto ec = WriteAt(
-            file.get(), offset, &kNoCheckSum, sizeof( kNoCheckSum ) ) ) {
-        return ec;
-    }
-
-    Log::Debug(
-        L"Cleared the stale PE checksum 0x{:08X} of '{}', a new one is not "
-        L"computed",
-        checksum,
-        path.wstring() );
     return {};
 }
 
@@ -480,15 +614,16 @@ public:
             return ec;
         }
 
-        // Best effort: the resources are already written, and a stale
-        // checksum is exactly what the caller would have been left with
-        // before this step existed, so a failure warns instead of failing
-        // the commit. Reporting it would also feed the contention retry in
-        // ops.cpp, which replays the whole sequence -- for Remove, against a
-        // resource that is already gone.
-        if( const auto ec = ClearCheckSum( m_path ) ) {
+        // Best effort: the resources are already written, and stale headers
+        // are exactly what the caller would have been left with before this
+        // step existed, so a failure warns instead of failing the commit.
+        // Reporting it would also feed the contention retry in ops.cpp,
+        // which replays the whole sequence -- for Remove, against a resource
+        // that is already gone.
+        if( const auto ec = ClearStaleHeaders( m_path ) ) {
             Log::Warn(
-                L"Failed to clear the PE checksum of '{}', it is now stale "
+                L"Failed to clear the stale PE headers of '{}'; its checksum "
+                L"and certificate table, if any, no longer match the file "
                 L"[{}]",
                 m_path.wstring(),
                 FormatError( ec ) );

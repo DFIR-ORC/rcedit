@@ -56,10 +56,11 @@ public:
         std::span< const uint8_t > data ) = 0;
     [[nodiscard]] virtual std::error_code Remove( const ResourceKey& key ) = 0;
 
-    // Writes the pending changes to the file. A PE checksum, invalidated by
-    // the update, is cleared rather than recomputed: the image ends up with
-    // no checksum at all, which the loader accepts for anything but a driver
-    // or a boot-time DLL.
+    // Writes the pending changes to the file, then drops what they
+    // invalidate in the PE headers: the checksum is cleared rather than
+    // recomputed (the loader accepts an image with none, unless it is a
+    // driver or a boot-time DLL), and the certificate table entry of a
+    // signed image is removed, with a warning.
     [[nodiscard]] virtual std::error_code Commit() = 0;
     virtual void Discard() = 0;
 };
