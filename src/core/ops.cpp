@@ -8,7 +8,9 @@
 #include "core/ops.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
+#include <thread>
 
 #include <windows.h>
 
@@ -104,6 +106,57 @@ std::error_code CopyToOutput(
     }
 
     return ec;
+}
+
+// Another process holding the PE open without sharing writes -- anti-virus
+// scanning a freshly linked binary, the search indexer, an earlier step of the
+// same build -- fails the update until it lets go.
+bool IsContention( const std::error_code& ec )
+{
+    if( ec.category() != std::system_category() ) {
+        return false;
+    }
+
+    switch( ec.value() ) {
+        // EndUpdateResourceW reports the write conflict as ERROR_OPEN_FAILED.
+        case ERROR_OPEN_FAILED:
+        case ERROR_SHARING_VIOLATION:
+        case ERROR_LOCK_VIOLATION:
+        case ERROR_ACCESS_DENIED:
+        case ERROR_USER_MAPPED_FILE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Runs the whole open/modify/commit sequence again on contention rather than
+// resuming it: Open()'s exclusive mapping, BeginUpdateResourceW and
+// EndUpdateResourceW can each be the one to hit the conflict, and the last of
+// them consumes the update session whether or not it succeeds, so there is
+// nothing left to resume from. 'update' must therefore be self-contained and
+// leave no session behind on failure.
+template < typename Update >
+std::error_code RetryOnContention( Update&& update )
+{
+    constexpr int kMaxAttempts = 10;
+    constexpr std::chrono::milliseconds kRetryDelay( 250 );
+
+    for( int attempt = 1;; ++attempt ) {
+        const auto ec = update();
+        if( !ec || attempt == kMaxAttempts || !IsContention( ec ) ) {
+            return ec;
+        }
+
+        Log::Warn(
+            L"Resource update held up by another process, retrying "
+            L"({}/{}) [{}]",
+            attempt,
+            kMaxAttempts,
+            FormatError( ec ) );
+
+        std::this_thread::sleep_for( kRetryDelay );
+    }
 }
 
 // Best-effort cleanup for a failure that occurs after CopyToOutput has
@@ -287,23 +340,24 @@ std::error_code Set(
         resolved.lang = 0;
     }
 
-    if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+    const auto ec = RetryOnContention( [ & ]() -> std::error_code {
+        if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+            return ec;
+        }
+
+        if( const auto ec = engine.Write( resolved, payload ) ) {
+            engine.Discard();
+            return ec;
+        }
+
+        return engine.Commit();
+    } );
+
+    if( ec ) {
         RemoveStrayOutput( output );
-        return ec;
     }
 
-    if( const auto ec = engine.Write( resolved, payload ) ) {
-        engine.Discard();
-        RemoveStrayOutput( output );
-        return ec;
-    }
-
-    if( const auto ec = engine.Commit() ) {
-        RemoveStrayOutput( output );
-        return ec;
-    }
-
-    return {};
+    return ec;
 }
 
 std::error_code Remove(
@@ -321,31 +375,36 @@ std::error_code Remove(
         return ec;
     }
 
-    if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+    const auto ec = RetryOnContention( [ & ]() -> std::error_code {
+        if( const auto ec = engine.Open( target, OpenMode::ReadWrite ) ) {
+            return ec;
+        }
+
+        // Resolved inside the retry: a new attempt re-opens the file, so the
+        // language has to be resolved again against that session. Caller-side
+        // reporting of the candidates on errc::ambiguous_language re-resolves
+        // them on its own read-only engine (see cli/Cmd/CmdCommon.cpp).
+        ResourceKey resolved;
+        std::vector< uint16_t > candidates;
+        if( const auto ec =
+                ResolveLanguage( engine, key, resolved, candidates ) ) {
+            engine.Discard();
+            return ec;
+        }
+
+        if( const auto ec = engine.Remove( resolved ) ) {
+            engine.Discard();
+            return ec;
+        }
+
+        return engine.Commit();
+    } );
+
+    if( ec ) {
         RemoveStrayOutput( output );
-        return ec;
     }
 
-    ResourceKey resolved;
-    std::vector< uint16_t > candidates;
-    if( const auto ec = ResolveLanguage( engine, key, resolved, candidates ) ) {
-        engine.Discard();
-        RemoveStrayOutput( output );
-        return ec;
-    }
-
-    if( const auto ec = engine.Remove( resolved ) ) {
-        engine.Discard();
-        RemoveStrayOutput( output );
-        return ec;
-    }
-
-    if( const auto ec = engine.Commit() ) {
-        RemoveStrayOutput( output );
-        return ec;
-    }
-
-    return {};
+    return ec;
 }
 
 std::error_code Hexdump(
