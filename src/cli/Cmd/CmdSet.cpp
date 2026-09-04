@@ -88,18 +88,23 @@ std::optional< std::wstring > ValidateSet( const ParsedArgs& args )
     return std::nullopt;
 }
 
-int RunSet( const ParsedArgs& args )
+}  // namespace
+
+std::error_code HandleSet( const ParsedArgs& args )
 {
     const auto key = ParseKey( args, true );
     if( !key ) {
-        return kUsage;
+        Log::Error( L"{}", key.error() );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     const auto codec = ParseCompress( args );
     if( !codec ) {
-        return kUsage;
+        Log::Error( L"{}", codec.error() );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
+    // Prepare data
     std::vector< uint8_t > data;
     if( const auto value = args.Value( L"value" ) ) {
         const auto utf8 = Utf16ToUtf8( *value );
@@ -107,7 +112,7 @@ int RunSet( const ParsedArgs& args )
             Log::Error(
                 L"--value is not valid UTF-16 [{}]",
                 FormatError( utf8.error() ) );
-            return kFailure;
+            return utf8.error();
         }
 
         data.assign( utf8->begin(), utf8->end() );
@@ -117,12 +122,7 @@ int RunSet( const ParsedArgs& args )
             reinterpret_cast< const uint8_t* >( value16->data() );
         data.assign( bytes, bytes + value16->size() * sizeof( wchar_t ) );
     }
-    else {
-        const auto valuePath = args.Value( L"value-path" );
-        if( !valuePath ) {
-            return kUsage;
-        }
-
+    else if( const auto valuePath = args.Value( L"value-path" ) ) {
         const fs::path path{ std::wstring( *valuePath ) };
         auto content = ReadFile( path );
         if( !content ) {
@@ -130,10 +130,14 @@ int RunSet( const ParsedArgs& args )
                 L"Failed to read '{}' [{}]",
                 path.wstring(),
                 FormatError( content.error() ) );
-            return kFailure;
+            return content.error();
         }
 
         data = std::move( *content );
+    }
+    else {
+        Log::Error( L"No input provided for 'set'" );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     auto engine = MakeWin32Engine();
@@ -150,16 +154,14 @@ int RunSet( const ParsedArgs& args )
         *codec == CodecId::None
             ? L""
             : std::format( L", {} compressed", CodecName( *codec ) ) );
-    return kOk;
+    return {};
 }
-
-}  // namespace
 
 CommandSpec GetSetCommandSpec()
 {
     return {
-        L"set", L"Add or replace one resource", kSetOptions, ValidateSet,
-        RunSet,
+        L"set",    L"Add or replace one resource", kSetOptions, ValidateSet,
+        HandleSet,
     };
 }
 

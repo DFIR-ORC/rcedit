@@ -25,11 +25,20 @@ constexpr OptionSpec kGetOptions[] = {
     kRaw,
 };
 
-int RunGet( const ParsedArgs& args )
+}  // namespace
+
+std::error_code HandleGet( const ParsedArgs& args )
 {
     const auto key = ParseKey( args, true );
     if( !key ) {
-        return kUsage;
+        Log::Error( L"{}", key.error() );
+        return std::make_error_code( std::errc::invalid_argument );
+    }
+
+    const auto outputPath = OutputPath( args );
+    if( !outputPath ) {
+        Log::Error( L"--output is required for 'get'" );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     auto engine = MakeWin32Engine();
@@ -39,23 +48,17 @@ int RunGet( const ParsedArgs& args )
         return Report( ec, args.pePath, *key );
     }
 
-    const auto outputPath = OutputPath( args );
-    if( !outputPath ) {
-        return kUsage;
-    }
-
-    const auto output = *outputPath;
-    if( const auto ec = WriteFile( output, data ) ) {
+    if( const auto ec = WriteFile( *outputPath, data ) ) {
         Log::Error(
-            L"Failed to write '{}' [{}]", output.wstring(), FormatError( ec ) );
-        return kFailure;
+            L"Failed to write '{}' [{}]",
+            outputPath->wstring(),
+            FormatError( ec ) );
+        return ec;
     }
 
-    Log::Info( L"Wrote {} bytes to '{}'", data.size(), output.wstring() );
-    return kOk;
+    Log::Info( L"Wrote {} bytes to '{}'", data.size(), outputPath->wstring() );
+    return {};
 }
-
-}  // namespace
 
 CommandSpec GetGetCommandSpec()
 {
@@ -64,7 +67,7 @@ CommandSpec GetGetCommandSpec()
         L"Extract one resource to a file (decompressed unless --raw)",
         kGetOptions,
         ValidateKeyOnly,
-        RunGet,
+        HandleGet,
     };
 }
 

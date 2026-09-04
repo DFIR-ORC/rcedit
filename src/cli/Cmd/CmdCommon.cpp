@@ -163,7 +163,7 @@ std::error_code WriteFile(
     return {};
 }
 
-int Report(
+std::error_code Report(
     const std::error_code& ec,
     const fs::path& pe,
     const ResourceKey& key )
@@ -186,12 +186,12 @@ int Report(
                 FormatResourceType( key.type ),
                 FormatResourceName( key.name ),
                 list );
-            return kFailure;
+            return ec;
         }
     }
 
     Log::Error( L"Failed on '{}' [{}]", pe.wstring(), FormatError( ec ) );
-    return kFailure;
+    return ec;
 }
 
 std::optional< std::wstring > ValidateKeyOnly( const ParsedArgs& args )

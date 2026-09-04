@@ -7,9 +7,13 @@
 //
 #pragma once
 
+#include <system_error>
+
 #include "cli/args.h"
 
 namespace rcedit::cli {
+
+[[nodiscard]] std::error_code HandleGet( const ParsedArgs& args );
 
 // Returns the spec that registers the 'get' command.
 [[nodiscard]] CommandSpec GetGetCommandSpec();

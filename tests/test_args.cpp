@@ -37,14 +37,14 @@ std::optional< std::wstring > ValidateBeta( const ParsedArgs& args )
     return std::nullopt;
 }
 
-int RunNoop( const ParsedArgs& )
+std::error_code HandleNoop( const ParsedArgs& )
 {
-    return 0;
+    return {};
 }
 
 const CommandSpec kCommands[] = {
-    { L"alpha", L"Alpha command", kAlphaOptions, nullptr, RunNoop },
-    { L"beta", L"Beta command", kBetaOptions, ValidateBeta, RunNoop },
+    { L"alpha", L"Alpha command", kAlphaOptions, nullptr, HandleNoop },
+    { L"beta", L"Beta command", kBetaOptions, ValidateBeta, HandleNoop },
 };
 
 std::expected< ParsedArgs, UsageError > ParseOf(

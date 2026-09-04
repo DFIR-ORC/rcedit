@@ -13,6 +13,7 @@
 #include "cli/Cmd/CmdCommon.h"
 #include "core/codec.h"
 #include "core/engine.h"
+#include "core/log.h"
 #include "core/ops.h"
 #include "core/output.h"
 #include "core/resource_id.h"
@@ -32,11 +33,14 @@ std::optional< std::wstring > ValidateList( const ParsedArgs& args )
     return std::nullopt;
 }
 
-int RunList( const ParsedArgs& args )
+}  // namespace
+
+std::error_code HandleList( const ParsedArgs& args )
 {
     const auto key = ParseKey( args, false );
     if( !key ) {
-        return kUsage;
+        Log::Error( L"{}", key.error() );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     ListOptions options;
@@ -98,17 +102,15 @@ int RunList( const ParsedArgs& args )
             content );
     }
 
-    return kOk;
+    return {};
 }
-
-}  // namespace
 
 CommandSpec GetListCommandSpec()
 {
     return {
         L"list",      L"List resources with size and detected compression",
         kListOptions, ValidateList,
-        RunList,
+        HandleList,
     };
 }
 

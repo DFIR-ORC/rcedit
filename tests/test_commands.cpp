@@ -38,7 +38,7 @@ void FiveCommandsInOrder()
     CHECK( commands[ 3 ].name == L"remove" );
     CHECK( commands[ 4 ].name == L"hexdump" );
     for( const auto& c : commands ) {
-        CHECK( c.run != nullptr );
+        CHECK( c.handle != nullptr );
         CHECK( !c.summary.empty() );
     }
 }

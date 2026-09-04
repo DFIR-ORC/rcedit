@@ -9,6 +9,7 @@
 
 #include "cli/Cmd/CmdCommon.h"
 #include "core/engine.h"
+#include "core/log.h"
 #include "core/ops.h"
 #include "core/output.h"
 
@@ -37,16 +38,20 @@ std::optional< std::wstring > ValidateHexdump( const ParsedArgs& args )
     return std::nullopt;
 }
 
-int RunHexdump( const ParsedArgs& args )
+}  // namespace
+
+std::error_code HandleHexdump( const ParsedArgs& args )
 {
     const auto key = ParseKey( args, true );
     if( !key ) {
-        return kUsage;
+        Log::Error( L"{}", key.error() );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     const auto limit = ParseLimit( args );
     if( !limit ) {
-        return kUsage;
+        Log::Error( L"{}", limit.error() );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     auto engine = MakeWin32Engine();
@@ -57,17 +62,15 @@ int RunHexdump( const ParsedArgs& args )
     }
 
     Out::Write( text );
-    return kOk;
+    return {};
 }
-
-}  // namespace
 
 CommandSpec GetHexdumpCommandSpec()
 {
     return {
         L"hexdump",      L"Print one resource as hex and ASCII",
         kHexdumpOptions, ValidateHexdump,
-        RunHexdump,
+        HandleHexdump,
     };
 }
 

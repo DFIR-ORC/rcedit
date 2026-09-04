@@ -29,11 +29,14 @@ constexpr OptionSpec kRemoveOptions[] = {
       L"Write to a copy of <pe_file> at FILE instead of in place" },
 };
 
-int RunRemove( const ParsedArgs& args )
+}  // namespace
+
+std::error_code HandleRemove( const ParsedArgs& args )
 {
     const auto key = ParseKey( args, true );
     if( !key ) {
-        return kUsage;
+        Log::Error( L"{}", key.error() );
+        return std::make_error_code( std::errc::invalid_argument );
     }
 
     auto engine = MakeWin32Engine();
@@ -46,16 +49,14 @@ int RunRemove( const ParsedArgs& args )
         L"Removed {}/{}",
         FormatResourceType( key->type ),
         FormatResourceName( key->name ) );
-    return kOk;
+    return {};
 }
-
-}  // namespace
 
 CommandSpec GetRemoveCommandSpec()
 {
     return {
-        L"remove", L"Delete one resource", kRemoveOptions, ValidateKeyOnly,
-        RunRemove,
+        L"remove",       L"Delete one resource", kRemoveOptions,
+        ValidateKeyOnly, HandleRemove,
     };
 }
 

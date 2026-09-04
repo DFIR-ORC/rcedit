@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace rcedit::cli {
 
@@ -36,7 +37,7 @@ struct CommandSpec
     std::span< const OptionSpec > options;
     std::optional< std::wstring > ( *validate )(
         const ParsedArgs& args );  // message on failure, may be null
-    int ( *run )( const ParsedArgs& args );  // exit code
+    std::error_code ( *handle )( const ParsedArgs& args );  // empty on success
 };
 
 struct ParsedArgs

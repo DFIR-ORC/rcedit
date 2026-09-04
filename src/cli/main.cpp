@@ -21,6 +21,7 @@
 
 namespace {
 
+constexpr int kFailure = 1;
 constexpr int kUsageError = 2;
 
 int Main( std::span< const std::wstring > argv )
@@ -56,7 +57,11 @@ int Main( std::span< const std::wstring > argv )
         parsed->verbose     ? Log::Level::Debug
             : parsed->quiet ? Log::Level::Error
                             : Log::Level::Info );
-    return parsed->command->run( *parsed );
+    if( const auto ec = parsed->command->handle( *parsed ) ) {
+        return kFailure;
+    }
+
+    return 0;
 }
 
 }  // namespace

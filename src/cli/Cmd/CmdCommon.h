@@ -21,11 +21,6 @@
 
 namespace rcedit::cli {
 
-// Exit codes shared by every command.
-inline constexpr int kOk = 0;
-inline constexpr int kFailure = 1;
-inline constexpr int kUsage = 2;
-
 // ---- shared option specs ----------------------------------------------------
 
 inline constexpr OptionSpec kTypeRequired = {
@@ -71,8 +66,9 @@ inline constexpr OptionSpec kRaw = {
     const std::filesystem::path& path,
     std::span< const uint8_t > data );
 
-// Explains an operation failure; lists candidate languages when ambiguous.
-int Report(
+// Logs an operation failure and returns 'ec' unchanged; lists candidate
+// languages when the resource exists in several of them.
+[[nodiscard]] std::error_code Report(
     const std::error_code& ec,
     const std::filesystem::path& pe,
     const ResourceKey& key );

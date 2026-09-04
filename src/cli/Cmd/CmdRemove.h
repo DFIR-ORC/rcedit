@@ -7,9 +7,13 @@
 //
 #pragma once
 
+#include <system_error>
+
 #include "cli/args.h"
 
 namespace rcedit::cli {
+
+[[nodiscard]] std::error_code HandleRemove( const ParsedArgs& args );
 
 // Returns the spec that registers the 'remove' command.
 [[nodiscard]] CommandSpec GetRemoveCommandSpec();
