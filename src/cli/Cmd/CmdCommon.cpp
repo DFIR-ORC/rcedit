@@ -179,10 +179,15 @@ void PrintConfirmation(
     // up.
     constexpr int kLabelWidth = 6;
 
-    Out::Print( L"{}\n", header );
+    // Blank lines above and below set the block apart from whatever the shell
+    // printed before it and from the next prompt.
+    Out::Print( L"\nSummary for rcedit:\n  {}\n", header );
     for( const auto& field : fields ) {
-        Out::Print( L"  {:<{}}  {}\n", field.label, kLabelWidth, field.value );
+        Out::Print(
+            L"    {:<{}}  {}\n", field.label, kLabelWidth, field.value );
     }
+
+    Out::Write( L"\n" );
 }
 
 std::wstring FormatTypeVerbose( const ResourceId& type )

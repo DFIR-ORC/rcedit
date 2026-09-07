@@ -74,9 +74,11 @@ struct ConfirmationField
     std::wstring value;
 };
 
-// Reports what a command did on stdout: a header line naming the file it
-// touched, then one indented "label  value" row per field. Silent under
-// --quiet. Diagnostics belong in Log; this is the command's result.
+// Reports what a command did on stdout, under a "Summary for rcedit:"
+// banner: an indented header line naming the file it touched, then one
+// further indented "label  value" row per field, blank lines around the whole
+// block. Silent under --quiet. Diagnostics belong in Log; this is the
+// command's result.
 void PrintConfirmation(
     std::wstring_view header,
     std::span< const ConfirmationField > fields );
