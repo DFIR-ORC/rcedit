@@ -1,0 +1,42 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_ROOT": "${sourceDir}/external/vcpkg",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      },
+      "environment": { "VCPKG_FEATURE_FLAGS": "manifests,versions" }
+    },
+    { "name": "default", "inherits": "base",
+      "cacheVariables": { "RCEDIT_ENABLE_7Z": "ON", "RCEDIT_ENABLE_ZSTD": "ON" } },
+    { "name": "no-7z", "inherits": "base",
+      "cacheVariables": { "RCEDIT_ENABLE_7Z": "OFF", "RCEDIT_ENABLE_ZSTD": "ON" } },
+    { "name": "no-zstd", "inherits": "base",
+      "cacheVariables": { "RCEDIT_ENABLE_7Z": "ON", "RCEDIT_ENABLE_ZSTD": "OFF" } },
+    { "name": "minimal", "inherits": "base",
+      "cacheVariables": { "RCEDIT_ENABLE_7Z": "OFF", "RCEDIT_ENABLE_ZSTD": "OFF" } }
+  ],
+  "buildPresets": [
+    { "name": "default-Debug", "configurePreset": "default", "configuration": "Debug" },
+    { "name": "default-RelWithDebInfo", "configurePreset": "default", "configuration": "RelWithDebInfo" },
+    { "name": "default-MinSizeRel", "configurePreset": "default", "configuration": "MinSizeRel" },
+    { "name": "no-7z-MinSizeRel", "configurePreset": "no-7z", "configuration": "MinSizeRel" },
+    { "name": "no-zstd-MinSizeRel", "configurePreset": "no-zstd", "configuration": "MinSizeRel" },
+    { "name": "minimal-MinSizeRel", "configurePreset": "minimal", "configuration": "MinSizeRel" }
+  ],
+  "testPresets": [
+    { "name": "default-Debug", "configurePreset": "default", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "default-RelWithDebInfo", "configurePreset": "default", "configuration": "RelWithDebInfo", "output": { "outputOnFailure": true } },
+    { "name": "default-MinSizeRel", "configurePreset": "default", "configuration": "MinSizeRel", "output": { "outputOnFailure": true } },
+    { "name": "no-7z-MinSizeRel", "configurePreset": "no-7z", "configuration": "MinSizeRel", "output": { "outputOnFailure": true } },
+    { "name": "no-zstd-MinSizeRel", "configurePreset": "no-zstd", "configuration": "MinSizeRel", "output": { "outputOnFailure": true } },
+    { "name": "minimal-MinSizeRel", "configurePreset": "minimal", "configuration": "MinSizeRel", "output": { "outputOnFailure": true } }
+  ]
+}

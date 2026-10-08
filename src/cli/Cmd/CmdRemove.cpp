@@ -1,0 +1,72 @@
+//
+// SPDX-License-Identifier: LGPL-2.1-or-later
+//
+// Copyright 2026 ANSSI. All Rights Reserved.
+//
+// Author(s): fabienfl (ANSSI)
+//
+#include "cli/Cmd/CmdRemove.h"
+
+#include "cli/Cmd/CmdCommon.h"
+#include "core/engine.h"
+#include "core/log.h"
+#include "core/ops.h"
+#include "core/resource_id.h"
+
+namespace rcedit::cli {
+
+namespace {
+
+constexpr OptionSpec kRemoveOptions[] = {
+    kTypeRequired,
+    kNameRequired,
+    kLang,
+    { L"output",
+      L'o',
+      true,
+      false,
+      L"FILE",
+      L"Write to a copy of <pe_file> at FILE instead of in place" },
+};
+
+}  // namespace
+
+std::error_code HandleRemove( const ParsedArgs& args )
+{
+    const auto key = ParseKey( args, true );
+    if( !key ) {
+        Log::Error( L"{}", key.error() );
+        return std::make_error_code( std::errc::invalid_argument );
+    }
+
+    auto engine = MakeWin32Engine();
+    const auto output = OutputPath( args );
+    RemoveResult result;
+    if( const auto ec =
+            Remove( *engine, args.pePath, *key, output, &result ) ) {
+        return Report( ec, args.pePath, *key );
+    }
+
+    const ConfirmationField fields[] = {
+        { L"Type", FormatTypeVerbose( key->type ) },
+        { L"Name", FormatResourceName( key->name ) },
+        { L"Lang", FormatLang( result.lang ) },
+    };
+
+    PrintConfirmation(
+        std::format(
+            L"Removed resource from '{}'",
+            ( output ? *output : args.pePath ).wstring() ),
+        fields );
+    return {};
+}
+
+CommandSpec GetRemoveCommandSpec()
+{
+    return {
+        L"remove",       L"Delete one resource", kRemoveOptions,
+        ValidateKeyOnly, HandleRemove,
+    };
+}
+
+}  // namespace rcedit::cli

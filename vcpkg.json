@@ -1,0 +1,17 @@
+{
+  "name": "rcedit",
+  "version": "2.0.0",
+  "description": "Edit resources of Windows PE files",
+  "license": "LGPL-2.1-or-later",
+  "dependencies": [],
+  "features": {
+    "7z": {
+      "description": "7z compression of resource payloads",
+      "dependencies": ["7zip"]
+    },
+    "zstd": {
+      "description": "zstd compression of resource payloads",
+      "dependencies": ["zstd"]
+    }
+  }
+}
