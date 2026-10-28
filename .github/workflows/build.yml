@@ -6,12 +6,25 @@ name: rcedit
 
 on:
   push:
-    branches: ["**"]
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  # The repository with full release protection. In this repository:
+  #   - the build provenance attestation is mandatory and verified;
+  #   - the release job fails if a release is not immutable.
+  # In other repositories (for example, a private repository without
+  # GitHub Enterprise Cloud), these checks are skipped with a notice.
+  # The name is fixed here, not detected, so nobody can disable a check
+  # with a settings change only. Change this value with a reviewed commit.
+  PROTECTED_RELEASE_REPO: 'DFIR-ORC/rcedit'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # Do not stop a release that is in progress.
 
 jobs:
   build:
@@ -20,55 +33,110 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [default, no-7z, no-zstd, minimal]
-        include:
-          - preset: default
-            extra_config: Debug
+        preset: [default]
+
+    permissions:
+      contents: read          # Checkout only. The build has no write access.
+      id-token: write         # Sign the attestation (Sigstore OIDC)
+      attestations: write     # Store the attestation
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: DFIR-ORC/actions-checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           submodules: true
+          persist-credentials: false # Do not keep the token on disk.
 
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: build/${{ matrix.preset }}/vcpkg_installed
-          key: vcpkg-${{ matrix.preset }}-${{ hashFiles('vcpkg.json', 'external/vcpkg_overlay_ports/**', 'external/vcpkg_overlay_triplets/**') }}-${{ hashFiles('.gitmodules') }}
+      # Find MSVC with vswhere. Do not hard-code the Visual Studio version or edition.
+      - name: Set up MSVC environment
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * `
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'MSVC is not installed on this runner.' }
+
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path -LiteralPath $vcvars)) { throw "File not found: $vcvars" }
+
+          # Run vcvars64.bat, then print the environment that it creates.
+          $lines = cmd /d /c "`"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw 'vcvars64.bat failed.' }
+          if (-not ($lines -match '^VCToolsInstallDir=')) { throw 'vcvars64.bat did not set the MSVC environment.' }
+
+          # Export only the variables that vcvars64.bat added or changed.
+          foreach ($line in $lines) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              $name, $value = $Matches[1], $Matches[2]
+              if ([Environment]::GetEnvironmentVariable($name) -ne $value) {
+                "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              }
+            }
+          }
+
+      # Fail early with a clear message if a tool is missing.
+      - name: Check tools
+        run: Get-Command cl.exe, link.exe, dumpbin.exe, ninja.exe -ErrorAction Stop | Format-Table Name, Source
 
       - name: Configure
-        shell: cmd
-        run: |
-          echo C:\Program Files\Ninja>> %GITHUB_PATH%
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }}
 
       - name: Build MinSizeRel
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cmake --build --preset ${{ matrix.preset }}-MinSizeRel
+        run: cmake --build --preset ${{ matrix.preset }}-MinSizeRel
 
       - name: Test MinSizeRel
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          ctest --preset ${{ matrix.preset }}-MinSizeRel
+        run: ctest --preset ${{ matrix.preset }}-MinSizeRel
 
-      - name: Build and test Debug
-        if: matrix.extra_config == 'Debug'
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cmake --build --preset ${{ matrix.preset }}-Debug
-          ctest --preset ${{ matrix.preset }}-Debug
+      # gh cannot sign attestations ('gh attestation' only verifies), so this action stays.
+      # Attestations in private repositories need GitHub Enterprise Cloud.
+      # '==' in expressions is case-insensitive for strings.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/') && github.repository == env.PROTECTED_RELEASE_REPO
+        uses: DFIR-ORC/actions-attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: |
+            build\default\MinSizeRel\rcedit.exe
+            build\default\MinSizeRel\rcedit.pdb
 
       - name: Upload artifact
-        if: matrix.preset == 'default' && startsWith(github.ref, 'refs/tags/')
-        uses: actions/upload-artifact@v4
+        if: matrix.preset == 'default' && github.ref_type == 'tag'
+        uses: DFIR-ORC/actions-upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: rcedit-${{ github.ref_name }}
-          path: |
-            build/default/MinSizeRel/rcedit.exe
-            build/default/MinSizeRel/rcedit.pdb
+          path: build\default\MinSizeRel\*
+          if-no-files-found: error
           retention-days: 7
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # Only this job can write. The build job stays read-only.
+
+    steps:
+      - name: Download artifact
+        uses: DFIR-ORC/actions-download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: rcedit-${{ github.ref_name }}
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Pass the tag through env, not inline, to prevent script injection.
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=(--prerelease) # For example v1.2.3-rc1.
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "rcedit $TAG" \
+            --generate-notes \
+            "${prerelease[@]}" \
+            dist/rcedit.exe dist/rcedit.pdb

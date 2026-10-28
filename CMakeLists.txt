@@ -33,14 +33,13 @@ if(RCEDIT_ENABLE_ZSTD)
     list(APPEND VCPKG_MANIFEST_FEATURES "zstd")
 endif()
 
+# TODO: use git's tag to track version
 project(rcedit VERSION 2.0.0 LANGUAGES C CXX RC)
 
-if(NOT MSVC)
-    message(FATAL_ERROR "rcedit requires MSVC")
-endif()
 if(BUILD_SHARED_LIBS)
     message(FATAL_ERROR "rcedit is static only: BUILD_SHARED_LIBS must be OFF")
 endif()
+
 # Only the codecs pull vcpkg ports in. The static CRT itself comes from
 # CMAKE_MSVC_RUNTIME_LIBRARY below and from src/cli's explicit /NODEFAULTLIB
 # link line, neither of which depends on the triplet, so a codec-less build
